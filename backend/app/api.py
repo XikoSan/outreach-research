@@ -57,6 +57,13 @@ def save_sender(profile:SenderProfile):
         previous=db.query(Sender).filter(Sender.profile['brand'].as_string()==profile.brand).order_by(Sender.version.desc()).first()
         s=Sender(profile=profile.model_dump(),version=(previous.version+1) if previous else 1);db.add(s);db.commit();return {'id':s.id,'version':s.version,'profile':s.profile}
 
+@app.delete('/api/senders/{sid}')
+def delete_sender(sid:str):
+    with Session() as db:
+        sender=get(db,Sender,sid)
+        if db.query(Sender).count()<=1:raise HTTPException(409,'Нельзя удалить последний профиль')
+        db.delete(sender);db.commit();return {'deleted':sid}
+
 @app.post('/api/materials/extract')
 def extract_material(file:UploadFile=File(...)):
     import zipfile,io

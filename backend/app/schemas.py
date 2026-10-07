@@ -10,6 +10,7 @@ class Offer(Strict):
     outcomes: str
     limits: str
 class SenderProfile(Strict):
+    profile_name: str = ''
     brand: str = Field(min_length=1, max_length=200)
     website: str = ''
     description: str = ''

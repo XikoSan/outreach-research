@@ -8,7 +8,7 @@ def default_profile():
         ('business_development','Развитие бизнеса','Найти и проверить новые рынки, сегменты, партнёрства и коммерческие возможности.','Карта возможностей, приоритетные гипотезы, сценарий проверки спроса и решение о продолжении.'),
         ('rnd','Business, Market & Product R&D','Снизить неопределённость до принятия решения.','Исследовательский вопрос, данные, ограничения, выводы и план проверки или внедрения.'),
         ('processes','Организация процессов','Сделать работу команды прозрачной и повторяемой.','Процессы, роли, передача информации, рабочие ритмы и план внедрения.')]
-    return SenderProfile(brand='oSpaceMarketing', description='Исследование бизнеса, рынка и продукта с переводом выводов в решения и внедрение.',offers=[dict(id=i,name=n,description=d,outcomes=o,limits='Без гарантии роста. Объём внедрения согласуется; внутренние проблемы не утверждаются без данных.') for i,n,d,o in descriptions]).model_dump()
+    return SenderProfile(profile_name='Основной профиль',brand='oSpaceMarketing', description='Исследование бизнеса, рынка и продукта с переводом выводов в решения и внедрение.',offers=[dict(id=i,name=n,description=d,outcomes=o,limits='Без гарантии роста. Объём внедрения согласуется; внутренние проблемы не утверждаются без данных.') for i,n,d,o in descriptions]).model_dump()
 
 def seed(db):
     if not db.query(Sender).first(): db.add(Sender(profile=default_profile()));db.commit()
