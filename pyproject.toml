@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "outreach-research"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "sqlalchemy>=2,<3", "alembic>=1.13,<2", "psycopg[binary]>=3,<4", "openpyxl>=3.1,<4", "httpx>=0.27,<1", "openai>=2,<3", "python-multipart>=0.0.20", "beautifulsoup4>=4.12,<5", "pydantic-settings>=2,<3"]
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+[tool.setuptools.packages.find]
+where = ["backend"]
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["tests"]
