@@ -198,6 +198,25 @@ class Reconciliation(BaseModel):
     verified_cost:float=Field(ge=0,le=10000)
     note:str=Field(min_length=5,max_length=1000)
 
+class APIKeyPayload(BaseModel):
+    api_key: str = Field(min_length=20, max_length=500)
+
+@app.post('/api/settings/openai-key')
+def save_openai_key(payload:APIKeyPayload):
+    """Keep the provider key in the local .env, never in a sender profile or API response."""
+    from .config import settings
+    env_path=Path('.env')
+    lines=env_path.read_text().splitlines() if env_path.exists() else []
+    replaced=False;out=[]
+    for line in lines:
+        if line.startswith('OPENAI_API_KEY='):
+            out.append('OPENAI_API_KEY='+payload.api_key);replaced=True
+        else:out.append(line)
+    if not replaced:out.append('OPENAI_API_KEY='+payload.api_key)
+    env_path.write_text('\n'.join(out)+'\n')
+    settings.openai_api_key=payload.api_key
+    return {'api_key_configured':True}
+
 @app.post('/api/calls/{cid}/reconcile')
 def reconcile(cid:str,payload:Reconciliation):
     with Session() as db:

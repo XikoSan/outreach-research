@@ -2,7 +2,7 @@
 import time, logging
 from sqlalchemy import text, update
 from .db import Session, Run, engine
-from .config import settings
+from .config import settings, Settings
 from .pipeline import Pipeline
 from .llm import BudgetPause, RunPaused, UncertainCall
 
@@ -24,7 +24,10 @@ def main():
             if run:run.status='RUNNING';run.error=None;run_id=run.id;db.commit()
             else:run_id=None
         if not run_id:time.sleep(1);continue
-        try:Pipeline(run_id).execute()
+        try:
+            # Reload a key saved through the sender profile without restarting the worker.
+            settings.openai_api_key=Settings().openai_api_key
+            Pipeline(run_id).execute()
         except (BudgetPause,RunPaused,UncertainCall) as e:
             with Session() as db:
                 r=db.get(Run,run_id)
