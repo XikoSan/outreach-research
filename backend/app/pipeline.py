@@ -15,6 +15,15 @@ from .config import settings
 DIRECTIONS=['website','social','news_jobs','reviews','forums']
 LIMIT_KEYS={'website':'max_website_pages','social':'max_social_sources','news_jobs':'max_external_sources','reviews':'max_review_sources','forums':'max_review_sources'}
 
+def sender_directions(sender):
+    # Legacy run snapshots retain their original scope. New profiles need no offer catalogue.
+    if sender.get('offers'):return sender['offers']
+    description=sender.get('description','').strip()
+    if not description:return []
+    return [{'id':'sender_activity','name':sender['brand'],'description':description,
+             'outcomes':sender.get('approved_claims',''),
+             'limits':'Формируй гипотезы из исследований. Не приписывай отправителю услуги и результаты, которых нет в описании.'}]
+
 def checkpoint(run_id,stage):
     with Session() as db:
         r=db.get(Run,run_id)
@@ -66,7 +75,7 @@ class Pipeline:
         with Session() as db:
             c=db.get(Company,company_id);r=db.get(Run,self.id)
             if c.stage=='PROFILE_READY' or c.identity=='NEEDS_REVIEW':return
-            config=r.config;sender=r.sender_snapshot['profile'];resource=c.resource;name=c.name;context=c.context
+            config=r.config;sender={**r.sender_snapshot['profile'],'offers':sender_directions(r.sender_snapshot['profile'])};resource=c.resource;name=c.name;context=c.context
         for direction in DIRECTIONS:
             checkpoint(self.id,'RESEARCH')
             with Session() as db:
@@ -151,7 +160,7 @@ class Pipeline:
         with Session() as db:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
-            sender=r.sender_snapshot['profile'];max_tokens=r.config['strategy_tokens']
+            sender={**r.sender_snapshot['profile'],'offers':sender_directions(r.sender_snapshot['profile'])};max_tokens=r.config['strategy_tokens']
             companies=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED').all()
             profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[])} for c in companies if c.profile.get('signals')]
         candidates=[]
@@ -162,7 +171,7 @@ class Pipeline:
             if size+length>70_000 and batch:batches.append(batch);batch=[];size=0
             batch.append(p);size+=length
         if batch:batches.append(batch)
-        for batch in batches:
+        for batch in batches if sender['offers'] else []:
             result=self.ask('segmentation',SEGMENT,{'profiles':batch,'offers':sender['offers']},Segments,max_output=max_tokens)
             candidates.extend(x.model_dump() for x in result.segments)
         # Incremental global consolidation remains bounded for large datasets.
@@ -175,7 +184,9 @@ class Pipeline:
             if seg['offer_id'] not in offer_ids or not set(seg['required_signals']+seg['supporting_signals']+seg['contradicting_signals'])<=known_signals:continue
             examples=[p for p in profiles if set(seg['required_signals']) <= {s['name'] for s in p['signals']}][:5]
             review=self.ask('segmentation',REVIEW,{'segment':seg,'profiles':examples,'offers':sender['offers']},Review,max_output=3000)
-            if review.passed:valid.append({**seg,'id':f'segment_{len(valid)+1:03d}'})
+            if review.passed:
+                signal_labels={s['name']:s['label'] for p in profiles for s in p['signals'] if s.get('label')}
+                valid.append({**seg,'id':f'segment_{len(valid)+1:03d}','signal_labels':signal_labels})
         with Session() as db:
             r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
     def finish(self):
@@ -199,7 +210,7 @@ class Pipeline:
         checkpoint(self.id,'EXPORT')
         with Session() as db:
             r=db.get(Run,self.id)
-            issues=db.query(Company).filter(Company.run_id==self.id,Company.group.in_(['FAILED','NEEDS_REVIEW','NOT_PROCESSED'])).count()
+            issues=db.query(Company).filter(Company.run_id==self.id,Company.group.in_(['FAILED','NEEDS_REVIEW','NOT_PROCESSED','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED'])).count()
             export_run(db,r,settings.data_dir/'exports',partial=bool(db.query(Company).filter_by(run_id=self.id,group='NOT_PROCESSED').count()))
             r.status='COMPLETED_WITH_ISSUES' if issues else 'COMPLETED';r.stage='EXPORTED';log(db,self.id,'EXPORTED','Экспорт прошёл проверку целостности');db.commit()
     def execute(self):

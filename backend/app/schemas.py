@@ -18,14 +18,14 @@ class SenderProfile(Strict):
     country: str = ''
     tax_id: str = ''
     address: str = ''
-    representative: str = 'Артём Кучеренко'
-    title: str = 'специалист по стратегическому развитию компаний'
-    signature: str = 'С уважением,\nАртём Кучеренко\nспециалист по стратегическому развитию компаний'
-    subject_rule: str = 'Сокращённое название компании + Артём Кучеренко'
+    representative: str = ''
+    title: str = ''
+    signature: str = ''
+    subject_rule: str = ''
     contacts: str = ''
     approved_claims: str = ''
     materials: str = ''
-    offers: list[Offer] = Field(min_length=1)
+    offers: list[Offer] = Field(default_factory=list)
 class RunConfig(Strict):
     max_search_queries: int = Field(default=6, ge=1, le=20)
     max_website_pages: int = Field(default=8, ge=1, le=30)
@@ -56,6 +56,7 @@ class EvidenceItem(Strict):
     origin: str
 class Signal(Strict):
     name: str
+    label: str = ''
     state: Literal['confirmed','refuted','unknown']
     confidence: Literal['HIGH','MEDIUM','LOW']
     evidence_ids: list[str]

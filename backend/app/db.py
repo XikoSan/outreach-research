@@ -14,11 +14,14 @@ class Sender(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     version: Mapped[int] = mapped_column(Integer, default=1)
     profile: Mapped[dict] = mapped_column(JSON)
+    archived: Mapped[bool] = mapped_column(default=False)
+    history: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[str] = mapped_column(String, default=now)
 class Run(Base):
     __tablename__ = 'runs'
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     filename: Mapped[str] = mapped_column(String)
+    name: Mapped[str] = mapped_column(String, default='')
     source_path: Mapped[str] = mapped_column(String)
     source_hash: Mapped[str] = mapped_column(String)
     sender_snapshot: Mapped[dict] = mapped_column(JSON)

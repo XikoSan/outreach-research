@@ -5,6 +5,7 @@ from openai import OpenAI, APIStatusError
 from sqlalchemy import update
 from .config import settings
 from .db import Session, Run, ModelCall, log
+from . import credentials
 
 RATES = {'gpt-6-luna': (.10, .50), 'gpt-6.1-sol': (2., 10.)}
 
@@ -27,7 +28,9 @@ def strict_schema(value):
 class Gateway:
     def __init__(self, run_id):
         self.run_id = run_id
-        self.client = OpenAI(api_key=settings.openai_api_key, max_retries=0, timeout=90)
+        self.client = None
+        self.profile_credentials = True
+        self.current_key = None
 
     def ask(self, role, instructions, payload, schema, max_output=5000, search=False, company_id=None):
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -44,6 +47,15 @@ class Gateway:
                 return schema.model_validate(saved.result)
             if saved and saved.state in ('STARTED', 'UNCERTAIN'):
                 raise UncertainCall('Исход предыдущего API-вызова неизвестен. Сверьте расход в журнале перед повтором.')
+            if getattr(self,'profile_credentials',False):
+                credential=credentials.for_run(run)
+                if not credential:
+                    run.status='PAUSED';run.error='Добавьте API-ключ в профиль отправителя и продолжите исследование.'
+                    db.commit();raise RunPaused()
+                if credential!=self.current_key:
+                    if self.client:self.client.close()
+                    self.client=OpenAI(api_key=credential,max_retries=0,timeout=90)
+                    self.current_key=credential
             if len(text.encode()) > 160_000: raise ValueError('Превышен лимит контекста; требуется разбиение')
             if search:
                 attempts = db.query(ModelCall).filter_by(run_id=self.run_id, company_id=company_id, search=True).filter(ModelCall.state != 'REJECTED').count()

@@ -2,7 +2,8 @@
 import time, logging
 from sqlalchemy import text, update
 from .db import Session, Run, engine
-from .config import settings, Settings
+from .config import settings
+from openai import APIStatusError
 from .pipeline import Pipeline
 from .llm import BudgetPause, RunPaused, UncertainCall
 
@@ -25,8 +26,6 @@ def main():
             else:run_id=None
         if not run_id:time.sleep(1);continue
         try:
-            # Reload a key saved through the sender profile without restarting the worker.
-            settings.openai_api_key=Settings().openai_api_key
             Pipeline(run_id).execute()
         except (BudgetPause,RunPaused,UncertainCall) as e:
             with Session() as db:
@@ -35,8 +34,10 @@ def main():
                 if isinstance(e,UncertainCall):r.error=str(e)
                 db.commit()
         except Exception as e:
-            logger.exception('Run failed: %s',run_id)
+            logger.error('Run failed: %s (%s)',run_id,type(e).__name__)
             with Session() as db:
-                r=db.get(Run,run_id);r.status='FAILED';r.error=type(e).__name__+': '+str(e)[:500];db.commit()
+                r=db.get(Run,run_id);r.status='FAILED'
+                r.error=('API отклонил запрос (HTTP '+str(e.status_code)+'). Проверьте подключение и доступ к моделям в аккаунте API.') if isinstance(e,APIStatusError) else type(e).__name__+': '+str(e)[:500]
+                db.commit()
 
 if __name__=='__main__':main()
