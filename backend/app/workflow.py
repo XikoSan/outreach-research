@@ -149,7 +149,7 @@ class PackageInput(BaseModel):
     save_sender:bool=False
     recipient_type:Literal['person','company']
     next_step:str=Field(min_length=1,max_length=1000)
-    budget:float=Field(gt=0,le=10000)
+    budget:float=0 # Legacy request field, no longer enforced.
 
 
 def freeze_contacts(run,rows,path):
@@ -225,7 +225,7 @@ def create_package(rid:str,payload:PackageInput):
         try:
             freeze_contacts(r,rows,folder/'contacts.xlsx')
             selection={'row_ids':[row.id for row in rows],'company_ids':sorted({row.company_id for row in rows}),'source_hash':r.source_hash,'segmentation_version':r.segmentation_version,'contacts_sha256':hashlib.sha256((folder/'contacts.xlsx').read_bytes()).hexdigest(),'request_hash':request_hash}
-            p=PromptPackage(id=pid,run_id=rid,name=payload.name.strip(),segment_snapshot={k:v for k,v in segment.items() if k!='prompt'},sender_snapshot=snapshot,context_snapshot=r.context_snapshot or {'summary':r.sender_snapshot.get('profile',{}).get('description','')},selection=selection,recipient_type=payload.recipient_type,next_step=payload.next_step.strip(),budget=payload.budget,path=str(folder))
+            p=PromptPackage(id=pid,run_id=rid,name=payload.name.strip(),segment_snapshot={k:v for k,v in segment.items() if k!='prompt'},sender_snapshot=snapshot,context_snapshot=r.context_snapshot or {'summary':r.sender_snapshot.get('profile',{}).get('description','')},selection=selection,recipient_type=payload.recipient_type,next_step=payload.next_step.strip(),budget=0,path=str(folder))
             db.add(p);db.commit();return package_view(p)
         except ValueError as e:
             db.rollback();shutil.rmtree(folder,ignore_errors=True);raise HTTPException(409,str(e))
@@ -249,15 +249,13 @@ def pause_package(pid:str):
         if p.status not in ('QUEUED','RUNNING'):raise HTTPException(409,'Комплект не обрабатывается')
         p.status='PAUSED' if p.status=='QUEUED' else 'PAUSING';db.commit();return package_view(p)
 
-class PackageBudget(BaseModel):budget:float=Field(gt=0,le=10000)
 @router.post('/packages/{pid}/resume')
-def resume_package(pid:str,payload:PackageBudget):
+def resume_package(pid:str):
     with Session() as db:
         p=get(db,PromptPackage,pid)
         if p.status not in ('PAUSED','FAILED'):raise HTTPException(409,'Комплект нельзя продолжить в текущем состоянии')
-        if payload.budget<p.spent+p.reserved:raise HTTPException(409,'Лимит ниже расхода и резерва')
         if not credentials.for_run(None):raise HTTPException(409,'Добавьте API-ключ в настройках')
-        p.budget=payload.budget;p.status='QUEUED';p.error=None;db.commit();return package_view(p)
+        p.status='QUEUED';p.error=None;db.commit();return package_view(p)
 
 @router.get('/packages/{pid}/download')
 def package_download(pid:str,file:Literal['contacts.xlsx','prompt.md','package.zip']='package.zip'):

@@ -70,12 +70,11 @@ class Gateway:
             # Conservative long-context rates; text bytes upper-bound text tokens.
             input_bound = 1_050_000 if search else len((text + instructions + json.dumps(schema.model_json_schema())).encode()) + 4000
             upper = input_bound * inp * 2 / 1_000_000 + max_output * out * 1.5 / 1_000_000 + (.01 if search else 0)
-            reserved = db.execute(update(target).where(target.id == target_id, target.status == 'RUNNING', target.spent + target.reserved + upper <= target.budget).values(reserved=target.reserved + upper))
+            reserved = db.execute(update(target).where(target.id == target_id, target.status == 'RUNNING').values(reserved=target.reserved + upper))
             if not reserved.rowcount:
                 db.refresh(run)
                 if run.status != 'RUNNING': raise RunPaused()
-                run.status = 'PAUSED'; run.error = 'Недостаточно бюджета для следующей операции. Увеличьте лимит и продолжите.'
-                db.commit(); raise BudgetPause()
+                raise RunPaused()
             if saved:
                 saved.state='STARTED'; saved.reservation=upper; saved.result=None
             else:

@@ -118,10 +118,6 @@ def test_package_budget_cache_and_unknown_call_reconciliation_are_separate(clien
     provider=Mock();factory=Mock(return_value=provider);monkeypatch.setattr('app.llm.OpenAI',factory)
     with Session() as db:p=db.get(PromptPackage,pid);p.status='RUNNING';db.commit()
     g=Gateway(r['id'],pid)
-    with pytest.raises(BudgetPause):g.ask('synthesis','check',{},Review)
-    assert provider.responses.create.call_count==0
-    with Session() as db:
-        p=db.get(PromptPackage,pid);p.status='RUNNING';p.budget=1;db.commit()
     provider.responses.create.side_effect=TimeoutError()
     with pytest.raises(UncertainCall):g.ask('synthesis','check',{},Review)
     with Session() as db:
@@ -160,3 +156,15 @@ def test_global_key_migration_does_not_restore_deleted_key(client):
     credentials.migrate_global();assert credentials.for_run(None)=='old-key'
     credentials.write(credentials.GLOBAL_ID,{})
     credentials.migrate_global();assert credentials.for_run(None)==''
+
+def test_new_research_without_budget_keeps_import_filters_and_server_models(client):
+    from app.api import models
+    context=client.post('/api/contexts',json={'name':'Услуги','summary':'Разработка маркетинговой стратегии'}).json()
+    content=workbook([['A','example.com','x','y']])
+    result=client.post('/api/runs',data={'context_id':context['id'],'name':'База производителей','source_filters':'Москва, производство, 50–200 сотрудников'},files={'file':('base.xlsx',content)})
+    assert result.status_code==200
+    run=result.json()
+    assert run['config']['source_filters']=='Москва, производство, 50–200 сотрудников'
+    assert run['config']['models']==models()
+    assert run['config']['max_companies'] is None
+    assert client.patch('/api/runs/'+run['id']+'/budget',json={'budget':1}).status_code in (404,405)

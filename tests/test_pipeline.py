@@ -88,11 +88,11 @@ def test_paid_response_is_reused_without_double_billing(client):
     with Session() as db:
         r=db.get(Run,rid);assert r.spent>0;assert r.reserved==pytest.approx(0);assert db.query(ModelCall).count()==1
 
-def test_budget_denies_before_call(client):
+def test_legacy_budget_does_not_stop_call(client):
     rid=new_run(client,budget=.00001);g=gateway(rid)
-    with pytest.raises(BudgetPause):g.ask('synthesis','check',{},Review)
-    assert g.client.responses.create.call_count==0
-    with Session() as db:assert db.get(Run,rid).status=='PAUSED'
+    g.ask('synthesis','check',{},Review)
+    assert g.client.responses.create.call_count==1
+    with Session() as db:assert db.get(Run,rid).status=='RUNNING'
 
 def test_unknown_transport_is_not_automatically_repeated(client):
     rid=new_run(client);g=gateway(rid,'timeout')

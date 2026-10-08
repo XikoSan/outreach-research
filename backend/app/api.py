@@ -121,13 +121,14 @@ def research_list(q:str='',status:str='',offset:int=Query(0,ge=0),limit:int=Quer
         return {'items':items,'total':total}
 
 @app.post('/api/runs')
-def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=Form(...),config_json:str=Form('{}'),name:str=Form(''),context_id:str=Form('')):
+def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=Form(0),config_json:str=Form('{}'),name:str=Form(''),context_id:str=Form(''),source_filters:str=Form('')):
     if len(name)>200:raise HTTPException(422,'Название: до 200 символов')
-    if not 0<budget<=10000:raise HTTPException(422,'Бюджет должен быть больше нуля и не более $10 000')
+    if len(source_filters)>8000:raise HTTPException(422,'Фильтры выгрузки: до 8000 символов')
     if Path(file.filename or '').suffix.lower()!='.xlsx':raise HTTPException(422,'Нужен файл XLSX')
     try:config=RunConfig.model_validate_json(config_json)
     except Exception:raise HTTPException(422,'Некорректные настройки')
-    merged=models()|config.models
+    merged=models()
+    if config.models and config.models!=merged:raise HTTPException(422,'Модели заранее заданы на сервере')
     if set(merged)!=set(models()) or any(m not in RATES for m in merged.values()):raise HTTPException(422,'Неподдерживаемая роль или модель')
     content=file.file.read(25_000_001)
     if len(content)>25_000_000:raise HTTPException(413,'Лимит XLSX 25 МБ')
@@ -145,7 +146,7 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=For
     rid=uid();folder=settings.data_dir/'uploads'/rid;folder.mkdir(parents=True)
     path=folder/'source.xlsx';path.write_bytes(content)
     with Session() as db:
-        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged},budget=budget)
+        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged,'source_filters':source_filters.strip()},budget=0)
         try:
             db.add(r);db.flush();import_rows(db,r);log(db,r.id,'IMPORTED','База импортирована',metrics={'rows':r.row_count,'companies':r.company_count});db.commit()
         except ValueError as e:db.rollback();shutil.rmtree(folder);raise HTTPException(422,str(e))
@@ -181,14 +182,6 @@ def pause(rid:str):
         elif r.status=='RUNNING':r.status='PAUSING'
         else:raise HTTPException(409,'Запуск не выполняется')
         db.commit();return run_view(r)
-
-class BudgetUpdate(BaseModel):budget:float=Field(gt=0,le=10000)
-@app.patch('/api/runs/{rid}/budget')
-def budget(rid:str,payload:BudgetUpdate):
-    with Session() as db:
-        r=get(db,Run,rid)
-        if payload.budget<r.spent+r.reserved:raise HTTPException(409,'Лимит ниже уже потраченного и зарезервированного')
-        r.budget=payload.budget;db.commit();return run_view(r)
 
 class RetryRequest(BaseModel):
     groups:list[str]=Field(default_factory=lambda:['FAILED','INSUFFICIENT_DATA','NOT_PROCESSED'])
