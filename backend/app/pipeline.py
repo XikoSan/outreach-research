@@ -24,6 +24,11 @@ def sender_directions(sender):
              'outcomes':sender.get('approved_claims',''),
              'limits':'Формируй гипотезы из исследований. Не приписывай отправителю услуги и результаты, которых нет в описании.'}]
 
+def research_sender(run):
+    if run.context_snapshot:
+        return {'brand':run.context_snapshot['name'],'description':run.context_snapshot['summary'],'offers':[]}
+    return run.sender_snapshot.get('profile',{})
+
 def checkpoint(run_id,stage):
     with Session() as db:
         r=db.get(Run,run_id)
@@ -75,7 +80,7 @@ class Pipeline:
         with Session() as db:
             c=db.get(Company,company_id);r=db.get(Run,self.id)
             if c.stage=='PROFILE_READY' or c.identity=='NEEDS_REVIEW':return
-            config=r.config;sender={**r.sender_snapshot['profile'],'offers':sender_directions(r.sender_snapshot['profile'])};resource=c.resource;name=c.name;context=c.context
+            config=r.config;sender={**research_sender(r),'offers':sender_directions(research_sender(r))};resource=c.resource;name=c.name;context=c.context
         for direction in DIRECTIONS:
             checkpoint(self.id,'RESEARCH')
             with Session() as db:
@@ -97,13 +102,13 @@ class Pipeline:
                 if direction=='website':
                     if found is None or not found.identity_confirmed:
                         with Session() as db:
-                            c=db.get(Company,company_id);c.identity='NEEDS_REVIEW';c.group='NEEDS_REVIEW';c.stage='PROFILE_READY';c.reason=found.identity_reason if found else 'Не удалось подтвердить идентичность в пределах лимита';db.commit()
+                            c=db.get(Company,company_id);c.identity='NEEDS_REVIEW';c.group='NEEDS_REVIEW';c.stage='PROFILE_READY';c.reason=found.identity_reason if found else 'Не удалось подтвердить идентичность в пределах лимита';c.research={**c.research,direction:{'state':'IDENTITY_REJECTED','discovery':found.model_dump() if found else {},'sources':sources,'summary':c.reason}};db.commit()
                         return
                     with Session() as db:
                         c=db.get(Company,company_id);c.identity='CONFIRMED';c.reason=found.identity_reason;db.commit()
                     if not any(h in (urlsplit(resource).hostname or '') for h in ('vk.com','linkedin.com')):sources=[resource]+sources
                 if direction=='social':sources=context.get('socials',[])+sources
-                state={'state':'DISCOVERED','sources':list(dict.fromkeys(sources))[:limit],'pages':[],'errors':[],'attempted_urls':[],'limited':limited}
+                state={'discovery':found.model_dump() if found else {},'state':'DISCOVERED','sources':list(dict.fromkeys(sources))[:limit],'pages':[],'errors':[],'attempted_urls':[],'limited':limited}
                 with Session() as db:
                     c=db.get(Company,company_id);c.research={**c.research,direction:state};db.commit()
             for url in state['sources']:
@@ -160,7 +165,7 @@ class Pipeline:
         with Session() as db:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
-            sender={**r.sender_snapshot['profile'],'offers':sender_directions(r.sender_snapshot['profile'])};max_tokens=r.config['strategy_tokens']
+            sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
             companies=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED').all()
             profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[])} for c in companies if c.profile.get('signals')]
         candidates=[]
@@ -179,34 +184,24 @@ class Pipeline:
         for start in range(0,len(candidates),12):
             result=self.ask('segmentation',SEGMENT+' Объедини кандидатов со сходной гипотезой; не добавляй новые имена признаков.',{'candidates':merged+candidates[start:start+12],'offers':sender['offers']},Segments,max_output=max_tokens)
             merged=[s.model_dump() for s in result.segments]
-        valid=[];known_signals={s['name'] for p in profiles for s in p['signals']};offer_ids={o['id'] for o in sender['offers']}
+        reviews=[];valid=[];known_signals={s['name'] for p in profiles for s in p['signals']};offer_ids={o['id'] for o in sender['offers']}
         for seg in merged:
             if seg['offer_id'] not in offer_ids or not set(seg['required_signals']+seg['supporting_signals']+seg['contradicting_signals'])<=known_signals:continue
             examples=[p for p in profiles if set(seg['required_signals']) <= {s['name'] for s in p['signals']}][:5]
             review=self.ask('segmentation',REVIEW,{'segment':seg,'profiles':examples,'offers':sender['offers']},Review,max_output=3000)
+            reviews.append({'segment':seg,'review':review.model_dump()})
             if review.passed:
                 signal_labels={s['name']:s['label'] for p in profiles for s in p['signals'] if s.get('label')}
                 valid.append({**seg,'id':f'segment_{len(valid)+1:03d}','signal_labels':signal_labels})
         with Session() as db:
-            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
+            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;r.reports={**r.reports,'segmentation':{'candidates':candidates,'reviews':reviews,'created_at':datetime.now(timezone.utc).isoformat()}};log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
     def finish(self):
         self.segment();checkpoint(self.id,'CLASSIFICATION')
         with Session() as db:
             r=db.get(Run,self.id)
             for c in db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED'):
                 c.group,c.reason=classify(c.profile,evidence_for(c),r.segments)
-            used={c.group for c in db.query(Company).filter_by(run_id=self.id)}
             db.commit()
-            sender=r.sender_snapshot['profile'];segments=list(r.segments)
-        for i,seg in enumerate(segments):
-            if seg.get('prompt') or seg['id'] not in used:continue
-            result=self.ask('prompt',PROMPT,{'segment':seg,'sender':sender},PromptResult,max_output=7000)
-            text=result.text
-            if not all(x in text for x in ['INPUT_ROW_DATA','Письмо 1','Письмо 2','Письмо 3','Письмо 4',sender['representative']]):raise ValueError('Промпт не прошёл структурную проверку')
-            review=self.ask('synthesis',REVIEW,{'prompt':text,'segment':seg,'sender':sender},Review,max_output=3000)
-            if not review.passed:raise ValueError('Промпт не прошёл содержательную проверку: '+'; '.join(review.issues))
-            segments[i]={**seg,'prompt':text}
-            with Session() as db:r=db.get(Run,self.id);r.segments=segments;db.commit()
         checkpoint(self.id,'EXPORT')
         with Session() as db:
             r=db.get(Run,self.id)

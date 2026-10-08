@@ -36,20 +36,22 @@ class FakeGateway:
             signals=[s for r in payload['reports'].values() for s in r['signals']]
             return Profile(description='Company',products='Products',audiences='B2B',signals=signals,contradictions=[],limitations=[])
         if schema is Segments:
-            return Segments(segments=[{'id':'candidate','name':'Новая аудитория','definition':'Two observed signals','offer_id':'product_marketing','hypothesis':'Может быть актуальна адаптация позиционирования','confidence':'MEDIUM','required_signals':['multiple_product_lines'],'supporting_signals':['new_market_entry'],'contradicting_signals':[],'outreach_angle':'Adapt communication','diagnostic_question':'Актуально ли?','allowed_claims':[],'forbidden_claims':['Гарантированный рост']}])
+            return Segments(segments=[{'id':'candidate','name':'Новая аудитория','definition':'Two observed signals','offer_id':payload['offers'][0]['id'],'hypothesis':'Может быть актуальна адаптация позиционирования','confidence':'MEDIUM','required_signals':['multiple_product_lines'],'supporting_signals':['new_market_entry'],'contradicting_signals':[],'outreach_angle':'Adapt communication','diagnostic_question':'Актуально ли?','allowed_claims':[],'forbidden_claims':['Гарантированный рост']}])
         if schema is Review:return Review(passed=True,issues=[])
-        if schema is PromptResult:return PromptResult(text='INPUT_ROW_DATA\nАртём Кучеренко\nТема письма\nПисьмо 1\nПисьмо 2\nПисьмо 3\nПисьмо 4\nГенерационный промпт для теста, не реальные письма.')
+        if schema is PromptResult:return PromptResult(text='INPUT_ROW_DATA\n'+payload.get('sender',{}).get('representative','Артём Кучеренко')+'\nТема письма\nПисьмо 1\nПисьмо 2\nПисьмо 3\nПисьмо 4\nГенерационный промпт для теста, не реальные письма.')
         raise AssertionError(schema)
 
 def fake_fetch(url):return {'url':url,'title':'Control','text':'This company offers multiple product lines.' if 'industry' not in url else 'The company is entering a new B2B market.','truncated':False}
 
-def test_offline_pipeline_exports_pairs_and_resume_reuses_profiles(client,monkeypatch):
+def test_research_stops_before_prompt_and_resume_reuses_profiles(client,monkeypatch):
     rid=new_run(client);monkeypatch.setattr('app.pipeline.fetch',fake_fetch);g=FakeGateway();Pipeline(rid,g).execute()
     with Session() as db:
         r=db.get(Run,rid);assert r.status=='COMPLETED';assert r.stage=='EXPORTED';assert r.segmentation_version==1
         assert {c.group for c in db.query(Company).filter_by(run_id=rid)}=={'segment_001'}
         exp=db.query(Export).filter_by(run_id=rid).one();assert exp.manifest['rows']==2 and not exp.manifest['partial']
-        assert 'prompts/segment_001.md' in exp.manifest['files']
+        assert 'databases/segment_001.xlsx' in exp.manifest['files']
+        assert not any(f.endswith('.md') for f in exp.manifest['files'])
+        assert 'prompt' not in g.roles
         r.status='RUNNING';db.commit()
     g.roles.clear();Pipeline(rid,g).execute();assert g.roles==[]
 

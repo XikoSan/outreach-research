@@ -104,7 +104,6 @@ def export_run(db,run,root,partial=None):
     for r in rows:
         group=companies[r.company_id].group
         if group not in STATUS_GROUPS and not re.fullmatch(r'segment_\d{3,}',group):raise ValueError('Некорректная группа')
-        if group not in STATUS_GROUPS and not segments.get(group,{}).get('prompt'):raise ValueError('Нет валидного промпта сегмента')
         grouped[group].append(r)
     export_id=uid();stage=Path(root)/('tmp-'+export_id);dest=Path(root)/export_id
     stage.mkdir(parents=True)
@@ -141,7 +140,7 @@ def export_run(db,run,root,partial=None):
                     if row.id in seen:raise ValueError('Повтор строки в экспорте')
                     seen.add(row.id)
             verified.close();manifest['files'].append(str(target.relative_to(stage)));manifest['groups'][group]=len(members)
-            if group not in STATUS_GROUPS:
+            if group not in STATUS_GROUPS and segments.get(group,{}).get('prompt'):
                 p=stage/'prompts'/(group+'.md');p.parent.mkdir(exist_ok=True);p.write_text(segments[group]['prompt'],encoding='utf-8');manifest['files'].append(str(p.relative_to(stage)))
         if len(seen)!=run.row_count:raise ValueError('Нарушено количество строк')
         manifest['checksums']={f:hashlib.sha256((stage/f).read_bytes()).hexdigest() for f in manifest['files']}

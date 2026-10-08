@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import update
 from pydantic import BaseModel, Field
 from .config import settings
-from .db import Base, engine, Session, Sender, Run, Company, SourceRow, Event, Export, ModelCall, uid, log, now
+from .db import Base, engine, Session, Sender, Run, Company, SourceRow, Event, Export, ModelCall, ResearchContext, PromptPackage, uid, log, now
 from . import credentials
 from .presentation import counts, company_view, ATTENTION
 from .seed import seed
@@ -19,6 +19,7 @@ from .llm import RATES
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine)
+    credentials.migrate_global()
     with Session() as db:seed(db)
     yield
 
@@ -40,10 +41,10 @@ def get(db,model,id):
     return item
 
 def run_view(r):
-    return {k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segments','segmentation_version','created_at','config','sender_snapshot')}
+    return {k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segments','segmentation_version','created_at','config','sender_snapshot','context_snapshot')}
 
 def sender_view(s):
-    return {'id':s.id,'version':s.version,'profile':s.profile,'connection':credentials.status(s.id)}
+    return {'id':s.id,'version':s.version,'profile':s.profile}
 
 def active_sender(db,sid):
     sender=get(db,Sender,sid)
@@ -81,7 +82,7 @@ def sender_history(sid:str):
 def delete_sender(sid:str):
     with Session() as db:
         sender=active_sender(db,sid)
-        if any(r.status in ('RUNNING','QUEUED','PAUSING') and r.sender_snapshot['id']==sid for r in db.query(Run)):
+        if any(r.status in ('RUNNING','QUEUED','PAUSING') and r.sender_snapshot.get('id')==sid for r in db.query(Run)):
             raise HTTPException(409,'Сначала остановите исследования этого профиля')
         sender.archived=True;credentials.write(sid,{});db.commit();return {'deleted':sid}
 
@@ -116,11 +117,11 @@ def research_list(q:str='',status:str='',offset:int=Query(0,ge=0),limit:int=Quer
         if status:query=query.filter(Run.status==status)
         total=query.count();items=[]
         for r in query.order_by(Run.created_at.desc(),Run.id).offset(offset).limit(limit):
-            items.append({k:getattr(r,k) for k in ('id','name','filename','company_count','status','stage','created_at')}|{'sender_name':r.sender_snapshot['profile'].get('profile_name') or r.sender_snapshot['profile']['brand'],**counts(db,r.id)})
+            items.append({k:getattr(r,k) for k in ('id','name','filename','company_count','status','stage','created_at')}|{'sender_name':r.context_snapshot.get('name') or r.sender_snapshot.get('profile',{}).get('brand',''), 'row_count':r.row_count,**counts(db,r.id)})
         return {'items':items,'total':total}
 
 @app.post('/api/runs')
-def create_run(file:UploadFile=File(...),sender_id:str=Form(...),budget:float=Form(...),config_json:str=Form('{}'),name:str=Form('')):
+def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=Form(...),config_json:str=Form('{}'),name:str=Form(''),context_id:str=Form('')):
     if len(name)>200:raise HTTPException(422,'Название: до 200 символов')
     if not 0<budget<=10000:raise HTTPException(422,'Бюджет должен быть больше нуля и не более $10 000')
     if Path(file.filename or '').suffix.lower()!='.xlsx':raise HTTPException(422,'Нужен файл XLSX')
@@ -130,12 +131,21 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(...),budget:float=Fo
     if set(merged)!=set(models()) or any(m not in RATES for m in merged.values()):raise HTTPException(422,'Неподдерживаемая роль или модель')
     content=file.file.read(25_000_001)
     if len(content)>25_000_000:raise HTTPException(413,'Лимит XLSX 25 МБ')
-    with Session() as db:active_sender(db,sender_id)
+    with Session() as db:
+        sender_snapshot={}
+        if context_id:
+            context=get(db,ResearchContext,context_id)
+            context_snapshot={k:getattr(context,k) for k in ('id','name','summary','source_name')}
+        elif sender_id:
+            sender=active_sender(db,sender_id)
+            sender_snapshot={'id':sender.id,'version':sender.version,'profile':sender.profile}
+            context_snapshot={'name':sender.profile['brand'],'summary':sender.profile.get('description','')}
+        else:raise HTTPException(422,'Выберите или заполните «Что предлагаем клиентам»')
+        if len(context_snapshot['summary'].strip())<10:raise HTTPException(422,'Добавьте описание деятельности и предложения')
     rid=uid();folder=settings.data_dir/'uploads'/rid;folder.mkdir(parents=True)
     path=folder/'source.xlsx';path.write_bytes(content)
     with Session() as db:
-        sender=get(db,Sender,sender_id)
-        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot={'id':sender.id,'version':sender.version,'profile':sender.profile},config={**config.model_dump(),'models':merged},budget=budget)
+        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged},budget=budget)
         try:
             db.add(r);db.flush();import_rows(db,r);log(db,r.id,'IMPORTED','База импортирована',metrics={'rows':r.row_count,'companies':r.company_count});db.commit()
         except ValueError as e:db.rollback();shutil.rmtree(folder);raise HTTPException(422,str(e))
@@ -145,7 +155,7 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(...),budget:float=Fo
 def run_detail(rid:str):
     with Session() as db:
         r=get(db,Run,rid);summary=counts(db,rid)
-        return {**run_view(r),**summary,'completed_companies':summary['researched'],'connection':credentials.status(r.sender_snapshot['id']),'exports':[{'id':e.id,'manifest':e.manifest,'created_at':e.created_at} for e in db.query(Export).filter_by(run_id=rid).order_by(Export.created_at.desc())]}
+        return {**run_view(r),**summary,'completed_companies':summary['researched'],'connection':credentials.status(),'exports':[{'id':e.id,'manifest':e.manifest,'created_at':e.created_at} for e in db.query(Export).filter_by(run_id=rid).order_by(Export.created_at.desc())]}
 
 class RunName(BaseModel):name:str=Field(min_length=1,max_length=200)
 @app.patch('/api/runs/{rid}')
@@ -158,7 +168,7 @@ def rename_run(rid:str,payload:RunName):
 def start(rid:str):
     with Session() as db:
         r=get(db,Run,rid)
-        if not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в профиль отправителя этого исследования')
+        if not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Запуск уже выполняется')
         if r.status in ('COMPLETED','COMPLETED_WITH_ISSUES'):raise HTTPException(409,'Используйте повторную обработку статусов')
         r.status='QUEUED';r.error=None;db.commit();return run_view(r)
@@ -241,15 +251,18 @@ def download(eid:str,file:str='results.zip'):
 def calls(rid:str):
     with Session() as db:
         get(db,Run,rid)
-        return [{'id':c.id,'role':c.role,'model':c.model,'state':c.state,'reservation':c.reservation,'cost':c.cost,'response_id':c.response_id} for c in db.query(ModelCall).filter(ModelCall.run_id==rid,ModelCall.state.in_(['STARTED','UNCERTAIN']))]
+        return [{'id':c.id,'role':c.role,'model':c.model,'state':c.state,'reservation':c.reservation,'cost':c.cost,'response_id':c.response_id,'package_id':c.package_id,'package_name':db.get(PromptPackage,c.package_id).name if c.package_id else None} for c in db.query(ModelCall).filter(ModelCall.run_id==rid,ModelCall.state.in_(['STARTED','UNCERTAIN']))]
 
 class Reconciliation(BaseModel):
     verified_cost:float=Field(ge=0,le=10000)
     note:str=Field(min_length=5,max_length=1000)
 
-@app.put('/api/senders/{sid}/connection')
-async def save_connection(sid:str,request:Request):
-    with Session() as db:active_sender(db,sid)
+@app.get('/api/settings/connection')
+def connection_status():return credentials.status()
+
+@app.put('/api/settings/connection')
+async def save_connection(request:Request):
+    sid=credentials.GLOBAL_ID
     # Validate manually so validation responses never echo credential input.
     try:
         payload=await request.json();key=payload.get('api_key','').strip()
@@ -258,16 +271,16 @@ async def save_connection(sid:str,request:Request):
     credentials.write(sid,{'key':key,'state':'saved'})
     return credentials.status(sid)
 
-@app.delete('/api/senders/{sid}/connection')
-def delete_connection(sid:str):
-    with Session() as db:active_sender(db,sid)
+@app.delete('/api/settings/connection')
+def delete_connection():
+    sid=credentials.GLOBAL_ID
     credentials.write(sid,{})
     return credentials.status(sid)
 
-@app.post('/api/senders/{sid}/connection/check')
-def check_connection(sid:str):
+@app.post('/api/settings/connection/check')
+def check_connection():
+    sid=credentials.GLOBAL_ID
     from openai import OpenAI,AuthenticationError,PermissionDeniedError
-    with Session() as db:active_sender(db,sid)
     value=credentials.read(sid)
     if not value.get('key'):raise HTTPException(409,'Сначала сохраните API-ключ')
     try:
@@ -281,13 +294,16 @@ def check_connection(sid:str):
 @app.post('/api/calls/{cid}/reconcile')
 def reconcile(cid:str,payload:Reconciliation):
     with Session() as db:
-        c=get(db,ModelCall,cid);r=get(db,Run,c.run_id)
+        c=get(db,ModelCall,cid);r=get(db,PromptPackage,c.package_id) if c.package_id else get(db,Run,c.run_id)
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Сначала дождитесь остановки')
         if c.state not in ('STARTED','UNCERTAIN'):raise HTTPException(409,'Операция уже сверена')
         r.reserved=max(0,r.reserved-c.reservation);r.spent+=payload.verified_cost
         c.state='RECONCILED';c.cost=payload.verified_cost;c.reservation=0
-        log(db,r.id,'RECONCILIATION','Расход сверён пользователем',c.company_id,{'call_id':cid,'cost':payload.verified_cost,'note':payload.note});db.commit()
+        log(db,c.run_id,'RECONCILIATION','Расход сверён пользователем',c.company_id,{'call_id':cid,'cost':payload.verified_cost,'note':payload.note});db.commit()
         return {'state':c.state}
+
+from .workflow import router as workflow_router
+app.include_router(workflow_router)
 
 frontend=Path(__file__).resolve().parents[2]/'frontend'/'dist'
 if frontend.exists():app.mount('/',StaticFiles(directory=frontend,html=True),name='ui')

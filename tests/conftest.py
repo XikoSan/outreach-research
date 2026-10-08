@@ -8,6 +8,8 @@ from app.api import app
 from fastapi.testclient import TestClient
 @pytest.fixture(autouse=True)
 def clean_database():
+    import shutil
+    shutil.rmtree(Path(os.environ['DATA_DIR'])/'credentials',ignore_errors=True)
     Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
     yield
 @pytest.fixture

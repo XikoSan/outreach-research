@@ -32,28 +32,24 @@ def test_last_profile_can_be_deleted_without_reseed(client):
     assert created['profile']['offers']==[]
     assert all(not value for key,value in created['profile'].items() if key!='brand')
 
-def test_credentials_are_isolated_private_and_never_echoed(client):
-    a=client.get('/api/senders').json()[0]['id']
-    b=client.post('/api/senders',json={'brand':'B'}).json()['id']
+def test_workspace_credential_is_private_and_independent_of_sender(client):
     key='sk-offline-private-test-not-a-real-key'
-    response=client.put('/api/senders/'+a+'/connection',json={'api_key':key})
+    response=client.put('/api/settings/connection',json={'api_key':key})
     assert response.status_code==200 and key not in response.text
-    assert credentials.location(a).stat().st_mode & 0o777==0o600
-    assert credentials.status(a)['configured'] and not credentials.status(b)['configured']
+    assert credentials.location(credentials.GLOBAL_ID).stat().st_mode & 0o777==0o600
+    assert credentials.status()['configured']
     r=upload(client,workbook([['A','example.com','x','y']])).json()
-    # upload chooses newest profile B, which must not borrow A's key.
-    assert r['sender_snapshot']['id']==b
-    assert client.post('/api/runs/'+r['id']+'/start').status_code==409
+    assert client.post('/api/runs/'+r['id']+'/start').status_code==200
     assert key not in client.get('/api/senders').text+client.get('/api/runs').text
     bad='sk-secret bad input must never echo'
-    response=client.put('/api/senders/'+a+'/connection',json={'api_key':bad})
+    response=client.put('/api/settings/connection',json={'api_key':bad})
     assert response.status_code==422 and bad not in response.text
-    client.delete('/api/senders/'+a+'/connection')
-    assert not credentials.status(a)['configured']
+    client.delete('/api/settings/connection')
+    assert not credentials.status()['configured']
 
-def test_gateway_uses_rotated_profile_key_and_pauses_before_reserving(client,monkeypatch):
+def test_gateway_uses_rotated_workspace_key_and_pauses_before_reserving(client,monkeypatch):
     rid=new_run(client)
-    with Session() as db:sid=db.get(Run,rid).sender_snapshot['id']
+    sid=credentials.GLOBAL_ID
     response=SimpleNamespace(id='offline',usage=SimpleNamespace(input_tokens=10,output_tokens=5),output=[],output_text='{"passed":true,"issues":[]}')
     provider=Mock();provider.responses.create.return_value=response
     factory=Mock(return_value=provider);monkeypatch.setattr('app.llm.OpenAI',factory)
@@ -70,13 +66,13 @@ def test_gateway_uses_rotated_profile_key_and_pauses_before_reserving(client,mon
         assert db.query(ModelCall).count()==2
 
 def test_connection_check_is_explicit_and_sanitized(client,monkeypatch):
-    sid=client.get('/api/senders').json()[0]['id']
+    sid=credentials.GLOBAL_ID
     credentials.write(sid,{'key':'offline-key'})
     provider=Mock();factory=Mock();factory.return_value.__enter__=Mock(return_value=provider);factory.return_value.__exit__=Mock(return_value=False)
     monkeypatch.setattr('openai.OpenAI',factory)
-    assert client.post('/api/senders/'+sid+'/connection/check').json()['state']=='verified'
+    assert client.post('/api/settings/connection/check').json()['state']=='verified'
     provider.models.list.side_effect=RuntimeError('offline-key secret')
-    result=client.post('/api/senders/'+sid+'/connection/check')
+    result=client.post('/api/settings/connection/check')
     assert result.status_code==502 and 'offline-key' not in result.text
 
 def test_progress_attention_filter_and_named_pagination(client):
