@@ -2,7 +2,7 @@
 from collections import Counter
 from sqlalchemy import func
 from .db import Company
-from .rules import classify
+from .rules import classify, classify_with_trace
 
 ATTENTION=('FAILED','NEEDS_REVIEW','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED')
 
@@ -25,10 +25,10 @@ def company_view(company,run,detail=False):
     names=set((segment or {}).get('required_signals',[])+(segment or {}).get('supporting_signals',[]))
     important=[s for s in signals if s.get('state')=='confirmed' and s.get('confidence') in ('HIGH','MEDIUM') and (not segment or s['name'] in names)]
     ev=evidence(company)
-    group,reason=classify(company.profile,ev,run.segments) if company.stage=='PROFILE_READY' and company.identity=='CONFIRMED' else (company.group,company.reason)
+    group,reason=(classify_with_trace(company.profile,ev,run.segments)[:2] if run.config.get('pipeline_version',1)>=3 else classify(company.profile,ev,run.segments)) if company.stage=='PROFILE_READY' and company.identity=='CONFIRMED' else (company.group,company.reason)
     result={k:getattr(company,k) for k in ('id','name','resource','identity','stage','group','reason')}
     result.update(segment=segment,signals=important[:3],evidence_count=len(ev),evidence_state='Достаточно для сегмента' if segment and group==company.group else ('Есть ограничения' if company.group in ATTENTION else 'Исследование не завершено'),evidence_reason=reason,latest_publication=max((e.get('published_at','') or '' for e in ev),default=''))
     if detail:
-        result.update(profile=company.profile,signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions')} for k,report in company.research.items()})
+        result.update(profile=company.profile,signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in company.research.items()})
     if not detail and segment:result['segment']={k:segment[k] for k in ('id','name','hypothesis')}
     return result

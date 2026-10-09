@@ -136,7 +136,8 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=For
         sender_snapshot={}
         if context_id:
             context=get(db,ResearchContext,context_id)
-            context_snapshot={k:getattr(context,k) for k in ('id','name','summary','source_name')}
+            from .revisions import context_snapshot as freeze_context
+            context_snapshot=freeze_context(context)
         elif sender_id:
             sender=active_sender(db,sender_id)
             sender_snapshot={'id':sender.id,'version':sender.version,'profile':sender.profile}
@@ -146,7 +147,7 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=For
     rid=uid();folder=settings.data_dir/'uploads'/rid;folder.mkdir(parents=True)
     path=folder/'source.xlsx';path.write_bytes(content)
     with Session() as db:
-        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged,'source_filters':source_filters.strip()},budget=0)
+        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged,'source_filters':source_filters.strip(),'pipeline_version':3 if context_id else 1,'research_as_of':now()[:10],'research_revision':1,'concurrency':3 if context_id else 1},budget=0)
         try:
             db.add(r);db.flush();import_rows(db,r);log(db,r.id,'IMPORTED','База импортирована',metrics={'rows':r.row_count,'companies':r.company_count});db.commit()
         except ValueError as e:db.rollback();shutil.rmtree(folder);raise HTTPException(422,str(e))
@@ -170,6 +171,7 @@ def start(rid:str):
     with Session() as db:
         r=get(db,Run,rid)
         if not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
+        if r.config.get('pipeline_version',1)<3 and db.query(ModelCall).filter_by(run_id=rid).count():raise HTTPException(409,'Это исследование создано старой версией конвейера. Для продолжения требуется перенос сохранённых результатов; автоматический повтор отключён.')
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Запуск уже выполняется')
         if r.status in ('COMPLETED','COMPLETED_WITH_ISSUES'):raise HTTPException(409,'Используйте повторную обработку статусов')
         r.status='QUEUED';r.error=None;db.commit();return run_view(r)
@@ -194,9 +196,9 @@ def retry(rid:str,payload:RetryRequest):
         if not set(payload.groups)<=allowed:raise HTTPException(422,'Повтор доступен только для статусных групп')
         cs=db.query(Company).filter(Company.run_id==rid,Company.group.in_(payload.groups)).all()
         for c in cs:
-            c.stage='PENDING';c.group='NOT_PROCESSED';c.research={};c.profile={};c.reason=''
-            if not c.resource.startswith('unresolved:'):c.identity='UNVERIFIED'
-            else:
+            from .revisions import prepare_retry
+            prepare_retry(c)
+            if c.resource.startswith('unresolved:'):
                 c.identity='NEEDS_REVIEW';c.group='NEEDS_REVIEW';c.stage='IDENTITY'
                 c.reason='Нет сайта или официальной социальной сети: повтор требует уточнения исходных данных'
         r.status='PAUSED';r.error=None;log(db,rid,'RETRY','Выбранные компании подготовлены к повтору',metrics={'companies':len(cs),'segmentation_version':r.segmentation_version});db.commit()
@@ -292,11 +294,27 @@ def reconcile(cid:str,payload:Reconciliation):
         if c.state not in ('STARTED','UNCERTAIN'):raise HTTPException(409,'Операция уже сверена')
         r.reserved=max(0,r.reserved-c.reservation);r.spent+=payload.verified_cost
         c.state='RECONCILED';c.cost=payload.verified_cost;c.reservation=0
+        from .db import ModelAttempt
+        attempt=db.query(ModelAttempt).filter_by(operation_id=cid).filter(ModelAttempt.state.in_(['STARTED','UNCERTAIN'])).order_by(ModelAttempt.created_at.desc()).first()
+        if attempt:
+            attempt.state='RECONCILED';attempt.cost=payload.verified_cost;attempt.metrics={**attempt.metrics,'reconciled':True,'note':payload.note}
         log(db,c.run_id,'RECONCILIATION','Расход сверён пользователем',c.company_id,{'call_id':cid,'cost':payload.verified_cost,'note':payload.note});db.commit()
         return {'state':c.state}
 
 from .workflow import router as workflow_router
 app.include_router(workflow_router)
+
+
+
+
+@app.get('/api/runs/{rid}/attempts')
+def attempts(rid:str,offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100)):
+    from .db import ModelAttempt
+    with Session() as db:
+        get(db,Run,rid)
+        query=db.query(ModelAttempt,ModelCall).join(ModelCall,ModelCall.id==ModelAttempt.operation_id).filter(ModelCall.run_id==rid)
+        total=query.count()
+        return {'total':total,'items':[{'id':a.id,'operation_id':a.operation_id,'role':c.role,'model':c.model,'state':a.state,'cost':a.cost,'reservation':a.reservation,'metrics':a.metrics,'created_at':a.created_at} for a,c in query.order_by(ModelAttempt.created_at.desc()).offset(offset).limit(limit)]}
 
 frontend=Path(__file__).resolve().parents[2]/'frontend'/'dist'
 if frontend.exists():app.mount('/',StaticFiles(directory=frontend,html=True),name='ui')

@@ -12,6 +12,7 @@ from app.pipeline import Pipeline
 from app.schemas import Review
 from app.workflow import generate_package
 from test_pipeline import FakeGateway, fake_fetch
+from v3_fakes import V3Gateway, v3_fetch
 from test_workflow import workbook
 
 
@@ -23,8 +24,8 @@ def research(client,monkeypatch,finish=True):
     r=response.json()
     if finish:
         with Session() as db:run=db.get(Run,r['id']);run.status='RUNNING';db.commit()
-        monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
-        gateway=FakeGateway();Pipeline(r['id'],gateway).execute()
+        monkeypatch.setattr('app.pipeline.fetch',v3_fetch)
+        gateway=V3Gateway();Pipeline(r['id'],gateway).execute()
         assert 'prompt' not in gateway.roles
     return r,context
 

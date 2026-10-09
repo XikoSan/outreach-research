@@ -101,7 +101,7 @@ def reports(rid:str,company_id:str=''):
             c=get(db,Company,company_id)
             if c.run_id!=rid:raise HTTPException(404,'Компания не относится к исследованию')
             result['company']=company_view(c,r,True)
-            result['directions']={direction:{k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations')} for direction,report in c.research.items()}
+            result['directions']={direction:{k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations','coverage','termination_reason','validation_version','external_checked')} for direction,report in c.research.items()}
         return result
 
 @router.get('/runs/{rid}/segments')
@@ -129,12 +129,15 @@ def contacts(rid:str,segment_id:str='',company_id:str='',q:str='',offset:int=Que
         if company_id:query=query.filter(Company.id==company_id)
         if q:query=query.filter(Company.name.ilike('%'+q+'%'))
         total=query.count();items=[]
-        wb=load_workbook(r.source_path,read_only=False)
+        selected=query.order_by(Company.name,SourceRow.sheet,SourceRow.row_index).offset(offset).limit(limit).all()
+        wb=load_workbook(r.source_path,read_only=False) if any(not row.display_fields for row,c in selected) else None
         try:
-            for row,c in query.order_by(Company.name,SourceRow.sheet,SourceRow.row_index).offset(offset).limit(limit):
-                ws=wb[row.sheet];fields=[{'column':cell.column,'name':str(ws.cell(1,cell.column).value or f'Колонка {cell.column}'),'value':str(cell.value) if cell.value is not None else ''} for cell in ws[row.row_index]]
+            for row,c in selected:
+                ws=wb[row.sheet] if wb else None
+                fields=row.display_fields or [{'column':cell.column,'name':str(ws.cell(1,cell.column).value or f'Колонка {cell.column}'),'value':str(cell.value) if cell.value is not None else ''} for cell in ws[row.row_index]]
                 items.append({'id':row.id,'company_id':c.id,'company_name':c.name,'sheet':row.sheet,'row':row.row_index,'fields':fields})
-        finally:wb.close()
+        finally:
+            if wb:wb.close()
         return {'items':items,'total':total}
 
 class PackageInput(BaseModel):
@@ -270,7 +273,7 @@ def generate_package(pid,gateway=None):
         p=db.get(PromptPackage,pid);rid=p.run_id
         if p.status!='RUNNING':raise RunPaused()
         sender={k:v for k,v in p.sender_snapshot['profile'].items() if k not in ('offers','description','materials')}
-        payload={'segment':p.segment_snapshot,'sender':sender,'research_context':p.context_snapshot.get('summary',''),'recipient_type':p.recipient_type,'next_step':p.next_step,'contacts':len(p.selection['row_ids'])}
+        payload={'segment':p.segment_snapshot,'sender':sender,'research_context':p.context_snapshot.get('prepared_text') or p.context_snapshot.get('source_text') or p.context_snapshot.get('summary',''),'recipient_type':p.recipient_type,'next_step':p.next_step,'contacts':len(p.selection['row_ids'])}
         prompt=p.prompt;review=p.review
     gw=gateway or Gateway(rid,package_id=pid)
     if not prompt:
@@ -296,3 +299,11 @@ def generate_package(pid,gateway=None):
             for name in ('contacts.xlsx','prompt.md','snapshot.json'):z.write(folder/name,name)
         p.status='COMPLETED';p.stage='READY';p.error=None
         log(db,rid,'PROMPT_PACKAGE','Подготовлен отдельный комплект для генерации',metrics={'package_id':pid,'contacts':len(p.selection['row_ids'])});db.commit()
+
+
+@router.get('/runs/{rid}/companies/{cid}/history')
+def company_history(rid:str,cid:str):
+    with Session() as db:
+        company=get(db,Company,cid)
+        if company.run_id!=rid:raise HTTPException(404,'Компания не относится к исследованию')
+        return {'current_revision':company.context.get('research_revision',1),'history':company.context.get('research_history',[])}

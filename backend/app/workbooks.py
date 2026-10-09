@@ -86,8 +86,11 @@ def import_rows(db,run):
                 c=Company(id=uid(),run_id=run.id,name=name,resource=resource,context={'names':[name],'description':val(cells,'Описание'),'socials':[s for s in [canonical_resource(val(cells,'VK компании'),True),canonical_resource(val(cells,'LinkedIn компании'),True)] if s]},identity='UNVERIFIED' if website or social else 'NEEDS_REVIEW',group='NOT_PROCESSED' if website or social else 'NEEDS_REVIEW',reason='' if website or social else 'Нет подтверждаемого сайта или корпоративной соцстраницы')
                 companies[resource]=c
             c=companies[resource]
+            legal=val(cells,'ИНН','Tax ID','ИНН компании')
+            if legal:
+                ids=list(dict.fromkeys(c.context.get('legal_ids',[])+[legal]));c.context={**c.context,'legal_ids':ids,'identity_conflict':len(ids)>1}
             if name not in c.context['names']:c.context={**c.context,'names':[*c.context['names'],name]}
-            rows_out.append(SourceRow(id=uid(),run_id=run.id,company_id=c.id,sheet=ws.title,row_index=cells[0].row,fingerprint=fingerprint(cells)))
+            rows_out.append(SourceRow(id=uid(),run_id=run.id,company_id=c.id,sheet=ws.title,row_index=cells[0].row,fingerprint=fingerprint(cells),display_fields=[{'column':cell.column,'name':str(headers[cell.column-1] or f'Колонка {cell.column}'),'value':str(cell.value) if cell.value is not None else ''} for cell in cells]))
     db.add_all(companies.values());db.flush();db.add_all(rows_out)
     run.row_count=len(rows_out);run.company_count=len(companies)
     run.config={**run.config,'sheets':[{'name':w.title,'headers':h,'rows':len(rs)} for w,h,_,_,rs in sheets]}

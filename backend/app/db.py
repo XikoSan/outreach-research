@@ -54,6 +54,7 @@ class Company(Base):
     profile: Mapped[dict] = mapped_column(JSON, default=dict)
     reason: Mapped[str] = mapped_column(Text, default='')
 class SourceRow(Base):
+    display_fields: Mapped[list] = mapped_column(JSON,default=list)
     __tablename__ = 'source_rows'
     __table_args__ = (UniqueConstraint('run_id','sheet','row_index'),)
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
@@ -138,3 +139,26 @@ class PromptPackage(Base):
     budget: Mapped[float] = mapped_column(Float)
     path: Mapped[str] = mapped_column(String)
     created_at: Mapped[str] = mapped_column(String, default=now)
+
+class ModelAttempt(Base):
+    __tablename__='model_attempts'
+    id: Mapped[str] = mapped_column(String(32),primary_key=True,default=uid)
+    operation_id: Mapped[str] = mapped_column(ForeignKey('model_calls.id'),index=True)
+    state: Mapped[str] = mapped_column(String,default='STARTED')
+    response_id: Mapped[str | None] = mapped_column(String,nullable=True)
+    metrics: Mapped[dict] = mapped_column(JSON,default=dict)
+    cost: Mapped[float | None] = mapped_column(Float,nullable=True)
+    reservation: Mapped[float] = mapped_column(Float,default=0)
+    created_at: Mapped[str] = mapped_column(String,default=now)
+
+class CompanyJob(Base):
+    __tablename__='company_jobs'
+    __table_args__=(UniqueConstraint('run_id','company_id','revision'),)
+    id: Mapped[str] = mapped_column(String(32),primary_key=True,default=uid)
+    run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'),index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey('companies.id'),index=True)
+    revision: Mapped[int] = mapped_column(Integer,default=1)
+    state: Mapped[str] = mapped_column(String,default='PENDING')
+    owner: Mapped[str | None] = mapped_column(String,nullable=True)
+    lease_until: Mapped[float] = mapped_column(Float,default=0)
+    stage: Mapped[str] = mapped_column(String,default='PENDING')

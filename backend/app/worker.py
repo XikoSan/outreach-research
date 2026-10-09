@@ -1,7 +1,7 @@
 """One durable worker per database; restart pauses uncertain in-flight work."""
 import time, logging
 from sqlalchemy import text, update
-from .db import Session, Run, PromptPackage, engine
+from .db import Session, Run, PromptPackage, CompanyJob, engine
 from .config import settings
 from openai import APIStatusError
 from .pipeline import Pipeline
@@ -21,6 +21,7 @@ def main():
         lock=engine.connect()
         if not lock.execute(text('SELECT pg_try_advisory_lock(18482026)')).scalar():raise RuntimeError('Worker already running')
     with Session() as db:
+        db.execute(update(CompanyJob).where(CompanyJob.state=='RUNNING').values(state='PAUSED',owner=None,lease_until=0))
         for model in (Run,PromptPackage):
             db.execute(update(model).where(model.status.in_(['RUNNING','PAUSING'])).values(status='PAUSED',error='Обработка прервана перезапуском. Проверьте расходы и продолжите.'))
         db.commit()

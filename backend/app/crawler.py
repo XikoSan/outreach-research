@@ -1,5 +1,7 @@
 """Bounded public HTTP collection with DNS pinning and redirect validation."""
-import socket, ssl, ipaddress, http.client, gzip
+import socket, ssl, ipaddress, http.client, gzip, hashlib, json, time, threading
+from datetime import datetime, timezone
+from .config import settings
 from urllib.parse import urlsplit, urljoin
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
@@ -35,19 +37,60 @@ def request(url,limit=2_000_000):
         finally:conn.close()
     raise SourceUnavailable('Слишком много перенаправлений')
 
-def fetch(url):
+_locks_guard=threading.Lock()
+_locks={}
+
+def domain_lock(url):
+    host=urlsplit(url).netloc
+    with _locks_guard:return _locks.setdefault(host,threading.Lock())
+
+def robots_allowed(url):
     p,_=public_address(url)
     robots_url=f'{p.scheme}://{p.netloc}/robots.txt'
+    key=hashlib.sha256(robots_url.encode()).hexdigest()
+    folder=settings.data_dir/'http-cache';folder.mkdir(parents=True,exist_ok=True)
+    path=folder/(key+'.robots.json')
     try:
-        _,body=request(robots_url,100_000)
-        robots=RobotFileParser();robots.parse(body.splitlines())
-        if not robots.can_fetch('OutreachResearchBot',url):raise SourceUnavailable('Запрещено robots.txt')
-    except SourceUnavailable as e:
-        if str(e)!='HTTP 404':raise
-    final,html=request(url)
+        value=json.loads(path.read_text())
+        if time.time()-value['saved_at']>3600:raise ValueError()
+        body=value['body']
+    except (OSError,ValueError,KeyError):
+        try:_,body=request(robots_url,100_000)
+        except SourceUnavailable as e:
+            if str(e)!='HTTP 404':raise
+            body=''
+        path.write_text(json.dumps({'saved_at':time.time(),'body':body}))
+    robots=RobotFileParser();robots.parse(body.splitlines())
+    if not robots.can_fetch('OutreachResearchBot',url):raise SourceUnavailable('Запрещено robots.txt')
+
+def parse_page(final,html):
     soup=BeautifulSoup(html,'html.parser')
     title=soup.title.get_text(' ',strip=True) if soup.title else ''
+    links=[]
+    for a in soup.find_all('a',href=True):
+        target=urljoin(final,a['href']).split('#')[0]
+        if urlsplit(target).scheme in ('http','https'):
+            links.append({'url':target,'label':a.get_text(' ',strip=True)[:160]})
+    dates=[m.get('content','') for m in soup.find_all('meta') if m.get('property') in ('article:published_time',) or m.get('name') in ('date','pubdate')]
     for tag in soup(['script','style','nav','footer','noscript','form']):tag.decompose()
     text=' '.join(soup.get_text(' ',strip=True).split())
     if len(text)<80:raise SourceUnavailable('Недостаточно доступного текста; возможно нужна JS-загрузка')
-    return {'url':final,'title':title,'text':text[:24000],'truncated':len(text)>24000}
+    return {'url':final,'title':title,'text':text[:24000],'truncated':len(text)>24000,
+            'links':list({x['url']:x for x in links}.values())[:200],'date_metadata':dates,
+            'retrieved_at':datetime.now(timezone.utc).isoformat(),'content_hash':hashlib.sha256(text.encode()).hexdigest()}
+
+def fetch(url):
+    # Cache is public source content only; no account or contact information.
+    folder=settings.data_dir/'http-cache';folder.mkdir(parents=True,exist_ok=True)
+    path=folder/(hashlib.sha256(url.encode()).hexdigest()+'.page.json')
+    with domain_lock(url):
+        try:
+            value=json.loads(path.read_text())
+            if time.time()-value['saved_at']<3600:return value['page']
+        except (OSError,ValueError,KeyError):pass
+        robots_allowed(url)
+        final,html=request(url)
+        if final!=url:robots_allowed(final)
+        page=parse_page(final,html)
+        temp=path.with_suffix('.tmp');temp.write_text(json.dumps({'saved_at':time.time(),'page':page},ensure_ascii=False));temp.replace(path)
+        return page

@@ -4,7 +4,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from app.db import Session, Run, Company, ModelCall
+from app.db import Session, Run, Company, ModelCall, ModelAttempt
 
 rid = sys.argv[1]
 folder = Path('data/observations') / rid
@@ -29,7 +29,11 @@ with Session() as db:
     companies = db.query(Company.stage, Company.group).filter(Company.run_id == rid).all()
     stages = Counter(stage for stage, group in companies)
     groups = Counter(group for stage, group in companies)
-    calls = db.query(ModelCall.role, ModelCall.model, ModelCall.state, ModelCall.cost, ModelCall.metrics).filter(ModelCall.run_id == rid, ModelCall.package_id.is_(None)).all()
+    operations = db.query(ModelCall).filter(ModelCall.run_id == rid, ModelCall.package_id.is_(None)).all()
+    history = defaultdict(list)
+    for attempt in db.query(ModelAttempt).join(ModelCall,ModelCall.id==ModelAttempt.operation_id).filter(ModelCall.run_id==rid,ModelCall.package_id.is_(None)):
+        history[attempt.operation_id].append(attempt)
+    calls=[(c.role,c.model,a.state,a.cost,a.metrics) for c in operations for a in (history[c.id] or [c])]
     totals = defaultdict(lambda: dict(calls=0, complete=0, uncertain=0, input_tokens=0, output_tokens=0, searches=0, estimated_usd=0.0))
     for role, model, state, cost, metrics in calls:
         t = totals[role, model]

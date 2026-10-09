@@ -43,11 +43,17 @@ class CandidateSource(Strict):
     direction: Literal['website','social','news_jobs','reviews','forums']
     rationale: str
 class Discovery(Strict):
+    identity_quote: str = ""
+    checked_directions: list[Literal["website","social","news_jobs","reviews","forums"]] = Field(default_factory=list)
     identity_confirmed: bool
     identity_reason: str
     products: str
     sources: list[CandidateSource]
 class EvidenceItem(Strict):
+    date_evidence: str = ""
+    subject_quote: str = ""
+    provenance_quote: str = ""
+    source_relation: Literal["primary","repost","unknown"] = "unknown"
     id: str
     url: str
     quote: str
