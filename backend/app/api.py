@@ -15,6 +15,7 @@ from .seed import seed
 from .schemas import SenderProfile, RunConfig
 from .workbooks import import_rows, export_run
 from .llm import RATES
+from . import oauth
 
 @asynccontextmanager
 async def lifespan(app):
@@ -251,6 +252,25 @@ def calls(rid:str):
 class Reconciliation(BaseModel):
     verified_cost:float=Field(ge=0,le=10000)
     note:str=Field(min_length=5,max_length=1000)
+
+
+@app.post('/api/auth/chatgpt/start')
+def chatgpt_start():
+    from fastapi.responses import RedirectResponse
+    return {'authorization_url':oauth.start()}
+
+@app.get('/api/auth/chatgpt/callback')
+def chatgpt_callback(request:Request):
+    try:
+        result=oauth.callback(dict(request.query_params))
+        return {'status':'connected','email':result.get('email',''),'scopes':result['scopes']}
+    except Exception as exc:
+        return JSONResponse({'status':'error','detail':str(exc)},status_code=400)
+
+@app.get('/api/settings/chatgpt')
+def chatgpt_status():
+    value=credentials.read(credentials.GLOBAL_ID)
+    return {'configured':value.get('provider')=='chatgpt','state':value.get('state','missing'),'email':value.get('email',''),'scopes':value.get('scopes',[])}
 
 @app.get('/api/settings/connection')
 def connection_status():return credentials.status()

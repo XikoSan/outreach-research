@@ -29,7 +29,9 @@ def status(sid=GLOBAL_ID):
     return {'configured':bool(value.get('key')),'state':value.get('state','missing'),'checked_at':value.get('checked_at')}
 
 def for_run(run):
-    return read(GLOBAL_ID).get('key','')
+    value=read(GLOBAL_ID)
+    if value.get('provider')=='chatgpt' and value.get('access_token') and value.get('expires_at',0)>__import__('time').time()+60:return value['access_token']
+    return value.get('key','')
 
 def migrate_global():
     # Run once. Never pick arbitrarily when old profiles used different accounts.
