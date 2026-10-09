@@ -30,5 +30,18 @@ API_GATE=ProviderGate()
 
 class OpenAIAdapter:
     capabilities=frozenset({'structured_output','web_search','usage'})
-    def generate(self,client,request):
-        return client.responses.create(**request)
+    def generate(self,client,request,stream=False):
+        if not stream:
+            return client.responses.create(**request)
+        completed=None
+        with client.responses.create(**request,stream=True) as events:
+            for event in events:
+                if event.type == 'response.failed':
+                    error=getattr(event.response,'error',None)
+                    code=getattr(error,'code','unknown_error') if error else 'unknown_error'
+                    raise RuntimeError(f'ChatGPT subscription response failed: {code}')
+                if event.type == 'response.completed':
+                    completed=event.response
+        if completed is None:
+            raise RuntimeError('ChatGPT subscription stream ended without response.completed')
+        return completed

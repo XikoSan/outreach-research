@@ -33,6 +33,10 @@ def for_run(run):
     if value.get('provider')=='chatgpt' and value.get('access_token') and value.get('expires_at',0)>__import__('time').time()+60:return value['access_token']
     return value.get('key','')
 
+def uses_chatgpt(run=None):
+    value=read(GLOBAL_ID)
+    return value.get('provider')=='chatgpt' and bool(value.get('access_token')) and value.get('expires_at',0)>__import__('time').time()+60
+
 def migrate_global():
     # Run once. Never pick arbitrarily when old profiles used different accounts.
     marker=location(GLOBAL_ID).parent/'workspace-migrated'

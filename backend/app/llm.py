@@ -109,10 +109,10 @@ class Gateway:
         kwargs = {'tools':[{'type':'web_search','search_context_size':'low'}], 'max_tool_calls':1} if search else {}
         try:
             # Parse manually after recording usage, so invalid JSON does not hide billing.
-            response = OpenAIAdapter().generate(self.client,dict(model=model,instructions=instructions,input=text,text={'format':{'type':'json_schema','name':schema.__name__,'strict':True,'schema':strict_schema(schema.model_json_schema())}},max_output_tokens=max_output,reasoning={'effort':'low' if role in ('discovery','extraction') else 'medium'},store=False,**kwargs))
+            response = OpenAIAdapter().generate(self.client,dict(model=model,instructions=instructions,input=[{'role':'user','content':text}],text={'format':{'type':'json_schema','name':schema.__name__,'strict':True,'schema':strict_schema(schema.model_json_schema())}},max_output_tokens=max_output,reasoning={'effort':'low' if role in ('discovery','extraction') else 'medium'},store=False,**kwargs),stream=credentials.uses_chatgpt(run))
         except Exception as error:
             if isinstance(error,APIStatusError) and error.status_code==429:API_GATE.rejected(error.response.headers.get('retry-after'))
-            definitive = isinstance(error, APIStatusError) and error.status_code in (400,401,403,404,422,429)
+            definitive = (isinstance(error, APIStatusError) and error.status_code in (400,401,403,404,422,429)) or 'subscription sharing usage limit' in str(error).lower()
             with Session() as db:
                 call=db.get(ModelCall,key); call.state='REJECTED' if definitive else 'UNCERTAIN'
                 attempt=db.get(ModelAttempt,attempt_id);attempt.state=call.state
