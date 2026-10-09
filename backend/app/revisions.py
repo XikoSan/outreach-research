@@ -21,9 +21,9 @@ def prepare_retry(company):
     reports={}
     for name,value in company.research.items():
         state=deepcopy(value)
-        if state.get('state') in ('UNAVAILABLE','LIMIT_REACHED','IDENTITY_REJECTED','FAILED'):
+        if state.get('state') in ('UNAVAILABLE','LIMIT_REACHED','IDENTITY_REJECTED','FAILED') or (state.get('state')=='DISCOVERED' and 'pages' not in state):
             # Identity rejection may have no page checkpoint; rebuild that direction cleanly.
-            if state.get('state')=='IDENTITY_REJECTED':
+            if state.get('state') in ('IDENTITY_REJECTED','DISCOVERED') and 'pages' not in state:
                 state={}
             else:
                 failed={e['url'] for e in state.get('errors',[]) if 'url' in e}

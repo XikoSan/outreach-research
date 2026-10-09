@@ -202,6 +202,12 @@ def retry(rid:str,payload:RetryRequest):
             if c.resource.startswith('unresolved:'):
                 c.identity='NEEDS_REVIEW';c.group='NEEDS_REVIEW';c.stage='IDENTITY'
                 c.reason='Нет сайта или официальной социальной сети: повтор требует уточнения исходных данных'
+        if cs:
+            history=list((r.reports or {}).get('segmentation_history',[]))
+            if r.segmentation_version or r.segments:
+                history.append({'version':r.segmentation_version,'segments':r.segments,'reason':'invalidated_by_retry'})
+            r.reports={**(r.reports or {}),'segmentation_history':history}
+            r.segments=[];r.segmentation_version=0
         r.status='PAUSED';r.error=None;log(db,rid,'RETRY','Выбранные компании подготовлены к повтору',metrics={'companies':len(cs),'segmentation_version':r.segmentation_version});db.commit()
         return {'companies':len(cs)}
 
