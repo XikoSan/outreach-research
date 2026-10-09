@@ -22,10 +22,13 @@ def prepare_retry(company):
     for name,value in company.research.items():
         state=deepcopy(value)
         if state.get('state') in ('UNAVAILABLE','LIMIT_REACHED','IDENTITY_REJECTED','FAILED'):
-            # Retain acquired pages and chunk checkpoints. Retry only failed URLs.
-            failed={e['url'] for e in state.get('errors',[]) if 'url' in e}
-            state['attempted_urls']=[u for u in state.get('attempted_urls',[]) if u not in failed]
-            state['errors']=[];state['state']='DISCOVERED'
+            # Identity rejection may have no page checkpoint; rebuild that direction cleanly.
+            if state.get('state')=='IDENTITY_REJECTED':
+                state={}
+            else:
+                failed={e['url'] for e in state.get('errors',[]) if 'url' in e}
+                state['attempted_urls']=[u for u in state.get('attempted_urls',[]) if u not in failed]
+                state['errors']=[];state['state']='DISCOVERED'
         reports[name]=state
     company.research=reports
     company.stage='PENDING';company.group='NOT_PROCESSED';company.profile={};company.reason=''

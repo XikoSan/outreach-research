@@ -126,6 +126,7 @@ class Pipeline:
                 state={'discovery':found.model_dump() if found else {},'state':'DISCOVERED','sources':list(dict.fromkeys(sources))[:limit],'pages':[],'errors':[],'attempted_urls':[],'limited':limited}
                 with Session() as db:
                     c=db.get(Company,company_id);c.research={**c.research,direction:state};db.commit()
+            state.setdefault('sources',[]); state.setdefault('pages',[]); state.setdefault('errors',[]); state.setdefault('attempted_urls',[]); state.setdefault('limited',False)
             for url in state['sources']:
                 if url in state['attempted_urls']:continue
                 checkpoint(self.id,'COLLECTING')

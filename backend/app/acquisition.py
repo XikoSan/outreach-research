@@ -30,7 +30,12 @@ def prepare(pipeline,cid,config,sender,fetch):
          'date':config['research_as_of'],'freshness_days':config['social_forum_days']},Discovery,search=True,company_id=cid)
     quote=found.identity_quote.strip()
     names=[n.casefold().strip() for n in context.get('names',[name]) if len(n.strip())>=3]
-    confirmed=bool(not context.get('identity_conflict') and initial and found.identity_confirmed and len(quote)>=15 and quote in initial['text'] and any(n in quote.casefold() for n in names))
+    # A website supplied by the source workbook is an authoritative identity anchor.
+    # Pages discovered on that same origin inherit the company identity; social and
+    # externally discovered resources still require the exact evidence gate below.
+    trusted_website=bool(resource and not resource.startswith('unresolved:') and not social(resource))
+    exact_evidence=bool(initial and found.identity_confirmed and len(quote)>=15 and quote in initial['text'] and any(n in quote.casefold() for n in names))
+    confirmed=bool(not context.get('identity_conflict') and (trusted_website or exact_evidence))
     sources={d:[] for d in ('website','social','news_jobs','reviews','forums')}
     official_socials=[]
     if initial:
