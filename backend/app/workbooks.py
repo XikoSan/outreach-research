@@ -37,6 +37,9 @@ def fingerprint(cells):
     vals=[]
     for c in cells:
         v=c.value
+        if v is None or v=='':
+            vals.append(['empty','str',''])
+            continue
         if isinstance(v,(datetime,date,time)):v=v.isoformat()
         vals.append([c.data_type,type(c.value).__name__,v])
     return hashlib.sha256(json.dumps(vals,ensure_ascii=False,default=str).encode()).hexdigest()
