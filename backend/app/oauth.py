@@ -1,5 +1,5 @@
 """Sign in with ChatGPT for local Plus-plan usage (PKCE, loopback callback)."""
-import base64, hashlib, json, secrets, time
+import base64, hashlib, json, secrets, time, uuid
 from urllib.parse import urlencode
 import httpx, jwt
 from jwt import PyJWKClient
@@ -11,7 +11,7 @@ _pending={}
 
 def start():
     verifier=base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b'=').decode();state=secrets.token_urlsafe(32);nonce=secrets.token_urlsafe(24)
-    host='urn:uuid:'+secrets.token_hex(16)
+    host='urn:uuid:'+str(uuid.uuid4())
     _pending[state]={'verifier':verifier,'nonce':nonce,'host':host,'created':time.time()}
     challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
     params={'client_id':'dynamic_agent_client','agent_name_hint':'XTECH Research','ext_agent_host_id':host,'response_type':'code','redirect_uri':REDIRECT,'scope':'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct','resource':RESOURCE,'state':state,'nonce':nonce,'code_challenge_method':'S256','code_challenge':challenge}
