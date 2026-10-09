@@ -70,6 +70,7 @@ def verify_report(report,pages,direction,days):
     return {'summary':report.summary,'evidence':accepted,'signals':signals,'contradictions':report.contradictions,'limitations':report.limitations+issues}
 
 class Pipeline:
+    selected_ids = None
     def __init__(self,run_id,gateway=None):self.id=run_id;self.gw=gateway or Gateway(run_id);self.injected_gateway=gateway is not None
     def ask(self,*args,**kwargs):
         with Session() as db:retries=db.get(Run,self.id).config['max_retries']
@@ -205,7 +206,9 @@ class Pipeline:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
             source_filters=r.config.get('source_filters','');sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
-            companies=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED').all()
+            query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
+            if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
+            companies=query.all()
             profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[]),'coverage_complete':c.profile.get('coverage_complete',True)} for c in companies if c.profile.get('signals')]
         v3=r.config.get('pipeline_version',1)>=3
         matrix=evidence_v3.build_feature_matrix(profiles) if v3 else None
@@ -251,7 +254,9 @@ class Pipeline:
         self.segment();checkpoint(self.id,'CLASSIFICATION')
         with Session() as db:
             r=db.get(Run,self.id)
-            for c in db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED'):
+            query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
+            if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
+            for c in query:
                 if r.config.get('pipeline_version',1)>=3:
                     c.group,c.reason,trace=classify_with_trace(c.profile,evidence_for(c),r.segments)
                     c.profile={**c.profile,'classification':{'segment_version':r.segmentation_version,'trace':trace}}
@@ -270,6 +275,7 @@ class Pipeline:
             r=db.get(Run,self.id);ids=[c.id for c in db.query(Company).filter_by(run_id=self.id).order_by(Company.id) if c.stage!='PROFILE_READY' and c.identity!='NEEDS_REVIEW']
             maximum=r.config.get('max_companies')
             if maximum:ids=ids[:maximum]
+            self.selected_ids=set(ids)
         def perform(cid):
             child=Pipeline(self.id) if r.config.get('pipeline_version',1)>=3 and isinstance(self.gw,Gateway) and not self.injected_gateway else self
             try:child.research(cid)
