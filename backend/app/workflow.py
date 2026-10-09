@@ -282,7 +282,7 @@ def generate_package(pid,gateway=None):
         with Session() as db:
             p=db.get(PromptPackage,pid);p.prompt=prompt;p.stage='REVIEW';db.commit()
     if not review.get('passed'):
-        checked=gw.ask('synthesis',REVIEW,{**payload,'prompt':prompt},Review,max_output=3000)
+        checked=gw.ask('synthesis',REVIEW,{**payload,'review_kind':'prompt','prompt':prompt},Review,max_output=3000)
         with Session() as db:
             p=db.get(PromptPackage,pid);p.review=checked.model_dump();db.commit()
         if not checked.passed:raise ValueError('Промпт не принят проверкой: '+'; '.join(checked.issues))

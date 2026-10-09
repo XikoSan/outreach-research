@@ -129,3 +129,26 @@ def test_authentication_failure_stops_run(client,monkeypatch):
     monkeypatch.setattr(Pipeline,'research',research)
     with pytest.raises(AuthenticationError):Pipeline(rid,gateway=FakeGateway()).execute()
     assert research.call_count==1
+
+def test_methodology_context_and_evidence_reach_models(client,monkeypatch):
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid);run.config={**run.config,'source_filters':'Регион из выгрузки, не доказательство'};db.commit()
+    monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
+    class Capture(FakeGateway):
+        def __init__(self):super().__init__();self.calls=[]
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            self.calls.append((schema,payload))
+            return super().ask(role,instructions,payload,schema,**kwargs)
+    gateway=Capture();pipeline=Pipeline(rid);pipeline.gw=gateway;pipeline.execute()
+    for schema,payload in gateway.calls:
+        if schema in (Discovery,ResearchReport,Profile):
+            assert payload['offers']
+            assert payload['source_filters']=='Регион из выгрузки, не доказательство'
+            assert payload['date']
+        if schema is Profile:
+            evidence=[e for report in payload['reports'].values() for e in report['evidence']]
+            assert evidence and all('quote' in e and 'published_at' in e for e in evidence)
+        if schema is Review:
+            assert payload['review_kind']=='segment'
+            assert all('evidence' in p for p in payload['profiles'])

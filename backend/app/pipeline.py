@@ -96,7 +96,7 @@ class Pipeline:
                 sources=[];found=None;limited=False
                 if limit:
                     try:
-                        found=self.ask('discovery',DISCOVERY,{'company':name,'resource':resource,'names':context.get('names',[]),'description':context.get('description',''),'direction':direction,'limit':limit,'offers':[{'id':o['id'],'description':o['description']} for o in sender['offers']]},Discovery,search=True,company_id=company_id)
+                        found=self.ask('discovery',DISCOVERY,{'company':name,'resource':resource,'names':context.get('names',[]),'description':context.get('description',''),'direction':direction,'limit':limit,'offers':sender['offers'],'source_filters':config.get('source_filters',''),'date':datetime.now(timezone.utc).date().isoformat(),'freshness_days':config['social_forum_days']},Discovery,search=True,company_id=company_id)
                         sources=[x.url for x in found.sources if x.direction==direction]
                     except SearchLimit:limited=True
                 if direction=='website':
@@ -130,7 +130,7 @@ class Pipeline:
                     chunk.append(page);size+=size_next
                 if chunk:chunks.append(chunk)
                 for part in chunks:
-                    report=self.ask('extraction',EXTRACT,{'company':name,'direction':direction,'date':r.created_at[:10],'freshness_days':config['social_forum_days'],'pages':part},ResearchReport,max_output=config['extraction_tokens'],company_id=company_id)
+                    report=self.ask('extraction',EXTRACT,{'company':name,'direction':direction,'date':datetime.now(timezone.utc).date().isoformat(),'offers':sender['offers'],'source_filters':config.get('source_filters',''),'freshness_days':config['social_forum_days'],'pages':part},ResearchReport,max_output=config['extraction_tokens'],company_id=company_id)
                     checked=verify_report(report,part,direction,config['social_forum_days'])
                     result['summary']+='\n'+checked['summary']
                     for field in ('evidence','signals','contradictions','limitations'):result[field]+=checked[field]
@@ -144,8 +144,8 @@ class Pipeline:
             all_evidence=evidence_for(c)
         if all_evidence:
             # Quotes are already validated; synthesis needs compact evidence identities.
-            compact={k:{**v,'evidence':[{'id':e['id'],'url':e['url'],'scope':e['scope']} for e in v['evidence']]} for k,v in reports.items()}
-            profile=self.ask('synthesis',SYNTHESIS,{'company':name,'reports':compact},Profile,company_id=company_id)
+            compact={k:{**v,'evidence':[{key:e.get(key) for key in ('id','url','scope','quote','published_at','origin')} for e in v['evidence']]} for k,v in reports.items()}
+            profile=self.ask('synthesis',SYNTHESIS,{'company':name,'reports':compact,'offers':sender['offers'],'source_filters':config.get('source_filters',''),'date':datetime.now(timezone.utc).date().isoformat(),'freshness_days':config['social_forum_days']},Profile,company_id=company_id)
             known={e['id'] for e in all_evidence};original=[s for v in reports.values() for s in v['signals']]
             checked=[];ranks={'LOW':0,'MEDIUM':1,'HIGH':2}
             for s in profile.signals:
@@ -165,9 +165,9 @@ class Pipeline:
         with Session() as db:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
-            sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
+            source_filters=r.config.get('source_filters','');sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
             companies=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED').all()
-            profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[])} for c in companies if c.profile.get('signals')]
+            profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[])} for c in companies if c.profile.get('signals')]
         candidates=[]
         # Bounded discovery batches. A final merge considers candidate definitions globally.
         batches=[];batch=[];size=0
@@ -177,7 +177,7 @@ class Pipeline:
             batch.append(p);size+=length
         if batch:batches.append(batch)
         for batch in batches if sender['offers'] else []:
-            result=self.ask('segmentation',SEGMENT,{'profiles':batch,'offers':sender['offers']},Segments,max_output=max_tokens)
+            result=self.ask('segmentation',SEGMENT,{'profiles':batch,'offers':sender['offers'],'source_filters':source_filters},Segments,max_output=max_tokens)
             candidates.extend(x.model_dump() for x in result.segments)
         # Incremental global consolidation remains bounded for large datasets.
         merged=[]
@@ -188,7 +188,7 @@ class Pipeline:
         for seg in merged:
             if seg['offer_id'] not in offer_ids or not set(seg['required_signals']+seg['supporting_signals']+seg['contradicting_signals'])<=known_signals:continue
             examples=[p for p in profiles if set(seg['required_signals']) <= {s['name'] for s in p['signals']}][:5]
-            review=self.ask('segmentation',REVIEW,{'segment':seg,'profiles':examples,'offers':sender['offers']},Review,max_output=3000)
+            review=self.ask('segmentation',REVIEW,{'review_kind':'segment','segment':seg,'profiles':examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
             reviews.append({'segment':seg,'review':review.model_dump()})
             if review.passed:
                 signal_labels={s['name']:s['label'] for p in profiles for s in p['signals'] if s.get('label')}
