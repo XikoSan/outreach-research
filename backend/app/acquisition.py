@@ -32,21 +32,21 @@ def prepare(pipeline,cid,config,sender,fetch):
     # A website supplied by the source workbook is an authoritative identity anchor.
     # Pages discovered on that same origin inherit the company identity; social and
     # externally discovered resources still require the exact evidence gate below.
-    trusted_website=bool(resource and not resource.startswith('unresolved:') and not social(resource))
+    declared_social=resource in context.get('socials',[])
+    trusted_website=bool(resource and not resource.startswith('unresolved:') and not (social(resource) or declared_social))
     exact_evidence=bool(initial and found.identity_confirmed and len(quote)>=15 and quote in initial['text'] and any(n in quote.casefold() for n in names))
     confirmed=bool(not context.get('identity_conflict') and (trusted_website or exact_evidence))
     sources={d:[] for d in ('website','social','news_jobs','reviews','forums')}
     official_socials=[]
     if initial:
-        if social(resource):sources['social'].append(initial['url']);official_socials.append(initial['url'])
+        if social(resource) or declared_social:sources['social'].append(initial['url']);official_socials.append(initial['url'])
         else:sources['website'].append(initial['url'])
         host=urlsplit(initial['url']).hostname
         for link in initial.get('links',[]):
             url=link['url']
             if social(url):sources['social'].append(url);official_socials.append(url)
             elif urlsplit(url).hostname==host and any(x in (url+' '+link['label']).lower() for x in ('about','contact','product','service','company','услуг','продукт','компан','контакт')):sources['website'].append(url)
-    for source in context.get('socials',[]):
-        if social(source):sources['social'].append(source)
+    for source in context.get('socials',[]):sources['social'].append(source)
     for source in found.sources:sources[source.direction].append(source.url)
     for d in sources:sources[d]=list(dict.fromkeys(sources[d]))
     plan={'discovery':found.model_dump(),'sources':sources,'initial_page':initial,'official_socials':official_socials,

@@ -97,6 +97,27 @@ def test_corporate_social_from_workbook_is_separate_unverified_source(client):
     assert plan['official_socials']==[]
 
 
+def test_declared_social_on_unknown_host_is_not_trusted_as_website(client):
+    context=client.post('/api/contexts',json={'name':'Offer','summary':'Research products and audiences without promising growth'}).json()
+    content=workbook([['Alpha',None,'https://social.example/@alpha']],['Название компании','Ссылка на сайт','Официальная соцсеть компании'])
+    response=client.post('/api/runs',data={'context_id':context['id']},files={'file':('source.xlsx',content)})
+    assert response.status_code==200,response.text
+    rid=response.json()['id']
+    with Session() as db:
+        company=db.query(Company).filter_by(run_id=rid).one()
+        assert company.resource=='https://social.example/@alpha'
+        assert company.context['socials']==[company.resource]
+        cid=company.id;config=dict(db.get(Run,rid).config)
+    class FakePipeline:
+        id=rid
+        def ask(self,*args,**kwargs):
+            return Discovery(identity_confirmed=False,identity_quote='',identity_reason='Unverified',products='',sources=[])
+    plan=prepare_sources(FakePipeline(),cid,config,{'offers':[]},lambda url:{'url':url,'text':'Unrelated text.','links':[]})
+    assert not plan['identity_confirmed']
+    assert plan['sources']['social']==['https://social.example/@alpha']
+    assert plan['sources']['website']==[]
+
+
 def test_retry_preserves_successful_reports_and_history(client,monkeypatch):
     rid=v3_run(client);monkeypatch.setattr('app.pipeline.fetch',v3_fetch);Pipeline(rid,V3Gateway()).execute()
     with Session() as db:

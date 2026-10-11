@@ -248,8 +248,11 @@ def research_base(pipeline,cid,fetch):
         resource=c.resource;name=c.name
         state=dict(c.research.get('base',{}));pages=list(state.get('pages',[]));attempted=list(state.get('attempted_urls',[]));errors=list(state.get('errors',[]))
         answers=state.get('answers',[]);evidence=state.get('evidence',[]);signals=state.get('signals',[]);citation_losses=set(state.get('citation_losses',[]))
-        if c.context.get('identity_conflict') or resource.startswith('unresolved:') or social(resource):
-            c.identity='NEEDS_REVIEW';c.stage='PROFILE_READY';c.group='NEEDS_REVIEW';c.reason='Базовый проход требует подтверждённого сайта';db.commit();return
+        if c.context.get('identity_conflict') or resource.startswith('unresolved:') or social(resource) or resource in c.context.get('socials',[]):
+            reason=('Конфликт ИНН у строк с одним опорным адресом' if c.context.get('identity_conflict')
+                    else 'Нет пригодного сайта или корпоративной соцстраницы' if resource.startswith('unresolved:')
+                    else 'Базовое исследование по корпоративной соцстранице пока недоступно')
+            c.identity='NEEDS_REVIEW';c.stage='PROFILE_READY';c.group='NEEDS_REVIEW';c.reason=reason;db.commit();return
     queue=[resource]
     def links(page):
         host=(urlsplit(resource).hostname or '').removeprefix('www.')

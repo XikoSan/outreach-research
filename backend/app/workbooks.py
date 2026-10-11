@@ -27,8 +27,8 @@ def canonical_resource(value, social=False):
         p=urlsplit(value if '://' in value else 'https://'+value)
         host=(p.hostname or '').lower().removeprefix('www.').removeprefix('m.').encode('idna').decode()
         if p.scheme not in ('http','https') or '.' not in host or p.username or p.password or p.port not in (None,80,443): return None
-        if host in SHARED: return None
-        is_social=host in SOCIAL
+        if host in SHARED or (social and host=='youtu.be'): return None
+        is_social=host in SOCIAL or bool(social and p.path.strip('/'))
         if is_social:
             parts=p.path.strip('/').split('/')
             if not parts[0]:return None
