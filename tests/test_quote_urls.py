@@ -18,3 +18,8 @@ def test_distinct_paths_queries_schemes_and_hosts_stay_distinct():
         result=checked(url)
         assert not result['evidence']
         assert 'страница не найдена' in result['limitations'][0]
+
+
+def test_default_port_is_same_page_but_nondefault_port_is_not():
+    assert len(checked('https://example.test:443')['evidence'])==1
+    assert not checked('https://example.test:8443')['evidence']

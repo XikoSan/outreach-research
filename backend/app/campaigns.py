@@ -234,6 +234,25 @@ class BasePageResult(Strict):
     answers: list[CriterionAnswer]
 
 
+def fetch_base_page(fetch, url, resource):
+    """Retry the supplied website once on its equivalent www host."""
+    from urllib.parse import urlsplit, urlunsplit
+    from .crawler import SourceUnavailable
+    try:
+        return fetch(url)
+    except (SourceUnavailable, TimeoutError, OSError) as first_error:
+        if isinstance(first_error, SourceUnavailable) and 'robots.txt' in str(first_error):
+            raise
+        parsed = urlsplit(resource)
+        if url != resource or not parsed.hostname or parsed.hostname.startswith('www.'):
+            raise
+        alternate = urlunsplit((parsed.scheme, 'www.' + parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+        try:
+            return fetch(alternate)
+        except (SourceUnavailable, TimeoutError, OSError) as second_error:
+            raise SourceUnavailable(f'{first_error}; www: {second_error}') from second_error
+
+
 def research_base(pipeline,cid,fetch):
     from .db import Company
     from .evidence import verify_report, normalized_signals
@@ -266,8 +285,8 @@ def research_base(pipeline,cid,fetch):
         checkpoint(pipeline.id,'BASE_RESEARCH')
         page=next((p for p in pages if p['url']==url),None)
         if page is None:
-            try:page=fetch(url)
-            except SourceUnavailable as exc:
+            try:page=fetch_base_page(fetch,url,resource)
+            except (SourceUnavailable, TimeoutError, OSError) as exc:
                 attempted.append(url);errors.append({'url':url,'reason':str(exc)[:200]})
                 with Session() as db:
                     c=db.get(Company,cid);c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals}};db.commit()
@@ -297,8 +316,10 @@ def research_base(pipeline,cid,fetch):
             c=db.get(Company,cid);c.research={**c.research,'base':state};db.commit()
     answers=answers or validate_answers([],criteria,[])
     with Session() as db:
-        c=db.get(Company,cid);c.identity='CONFIRMED';c.stage='PROFILE_READY';c.group='NOT_PROCESSED'
-        c.profile={'description':name,'signals':normalized_signals(signals+criterion_signals(answers,evidence)),'base_research':{'version':VERSION,'source_hash':contract['source_hash'],'answers':answers},'coverage_complete':False,'research_as_of':config['research_as_of'],'limitations':['Базовый проход; внешние источники не проверялись'],'contradictions':state.get('contradictions',[])}
+        c=db.get(Company,cid);c.identity='CONFIRMED';c.stage='PROFILE_READY'
+        c.group='NOT_PROCESSED' if pages else 'INSUFFICIENT_DATA'
+        c.reason='' if pages else 'Не удалось прочитать предоставленный сайт; критерии остались неизвестными'
+        c.profile={'description':name,'signals':normalized_signals(signals+criterion_signals(answers,evidence)),'base_research':{'version':VERSION,'source_hash':contract['source_hash'],'answers':answers},'coverage_complete':False,'research_as_of':config['research_as_of'],'limitations':['Базовый проход; внешние источники не проверялись']+([] if pages else ['Сайт недоступен для базового сбора']),'contradictions':state.get('contradictions',[])}
         c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'state':'COMPLETE','termination_reason':'criteria_answered' if all(a['status']=='confirmed' for a in answers) else 'page_limit' if len(attempted)>=limit else 'sources_exhausted'}}
         db.commit()
 

@@ -29,9 +29,13 @@ def normalized_signals(signals):
     return [groups[key] for key in sorted(groups)]
 
 def page_key(url):
-    """Only normalize equivalent root paths; preserve scheme, query and other paths."""
+    """Normalize equivalent root paths and default ports; preserve host and query."""
     parts=urlsplit(url)
-    return urlunsplit((parts.scheme.lower(),parts.netloc.lower(),parts.path or '/',parts.query,''))
+    scheme=parts.scheme.lower()
+    netloc=parts.netloc.lower()
+    if scheme=='https' and netloc.endswith(':443'):netloc=netloc[:-4]
+    elif scheme=='http' and netloc.endswith(':80'):netloc=netloc[:-3]
+    return urlunsplit((scheme,netloc,parts.path or '/',parts.query,''))
 
 def verify_report(report,pages,direction,days,*,as_of,company_id):
     reference=date.fromisoformat(as_of[:10]);accepted=[];mapping={};issues=[]

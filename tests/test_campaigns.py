@@ -252,3 +252,87 @@ def test_citation_repair_does_not_trust_unbound_saved_page(client):
         id=rid
         def ask(self,*args,**kwargs):raise AssertionError('Unbound page must not reach a paid model call')
     assert not repair_citation_losses(NoCalls(),cid,{'products'})
+
+
+def test_base_fetch_retries_equivalent_www_host_after_network_failure():
+    from app.campaigns import fetch_base_page
+    from app.crawler import SourceUnavailable
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if url == 'https://example.org':
+            raise SourceUnavailable('HTTP 404')
+        return {'url': url, 'text': 'Company information'}
+
+    page = fetch_base_page(fetch, 'https://example.org', 'https://example.org')
+    assert page['url'] == 'https://www.example.org'
+    assert calls == ['https://example.org', 'https://www.example.org']
+
+
+def test_base_fetch_does_not_retry_robots_denial_or_unrelated_page():
+    from app.campaigns import fetch_base_page
+    from app.crawler import SourceUnavailable
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        raise SourceUnavailable('Запрещено robots.txt')
+
+    with pytest.raises(SourceUnavailable, match='robots.txt'):
+        fetch_base_page(fetch, 'https://example.org', 'https://example.org')
+    assert calls == ['https://example.org']
+
+    def timeout(url):
+        calls.append(url)
+        raise TimeoutError('network timeout')
+
+    with pytest.raises(TimeoutError):
+        fetch_base_page(timeout, 'https://example.org/products', 'https://example.org')
+    assert calls[-1] == 'https://example.org/products'
+
+
+def test_base_unreadable_site_has_insufficient_data_without_model_call(client):
+    from app.campaigns import research_base
+    from app.crawler import SourceUnavailable
+    from app.db import Company
+    from app.pipeline import Pipeline
+    rid = new_run(client)
+    with Session() as db:
+        run = db.get(Run, rid)
+        run.config = {**run.config, 'pipeline_version': 3, 'methodology_version': 'campaign-v1',
+                      'research_as_of': '2026-10-10', 'max_website_pages': 2}
+        run.reports = {**run.reports, 'campaign_plan': {'version': 'campaign-v1', 'source_hash': 'test',
+                         'plan': plan().model_dump(), 'base_criteria': BASE_CRITERIA}}
+        cid = db.query(Company).filter_by(run_id=rid).first().id
+        db.commit()
+
+    class NoModel:
+        def ask(self, *args, **kwargs):
+            raise AssertionError('An unreadable site must not trigger a model call')
+
+    def fail(url):
+        raise SourceUnavailable('HTTP 425')
+
+    research_base(Pipeline(rid, NoModel()), cid, fail)
+    with Session() as db:
+        company = db.get(Company, cid)
+        assert company.group == 'INSUFFICIENT_DATA'
+        assert company.stage == 'PROFILE_READY'
+        assert not company.research['base']['pages']
+        assert company.research['base']['errors']
+        assert all(answer['status'] == 'unknown' for answer in company.profile['base_research']['answers'])
+
+
+def test_base_only_pilot_cannot_start_full_pipeline(client):
+    rid = new_run(client)
+    with Session() as db:
+        run = db.get(Run, rid)
+        run.reports = {'pilot': {'kind': 'base_only'}}
+        original_status = run.status
+        db.commit()
+    response = client.post(f'/api/runs/{rid}/start')
+    assert response.status_code == 409
+    assert 'только базового сбора' in response.json()['detail']
+    with Session() as db:
+        assert db.get(Run, rid).status == original_status

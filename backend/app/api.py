@@ -171,6 +171,8 @@ def rename_run(rid:str,payload:RunName):
 def start(rid:str):
     with Session() as db:
         r=get(db,Run,rid)
+        if r.reports.get('pilot',{}).get('kind')=='base_only':
+            raise HTTPException(409,'Это пилот только базового сбора; обычный запуск сегментации отключён')
         if not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
         if r.config.get('pipeline_version',1)<3 and db.query(ModelCall).filter_by(run_id=rid).count():raise HTTPException(409,'Это исследование создано старой версией конвейера. Для продолжения требуется перенос сохранённых результатов; автоматический повтор отключён.')
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Запуск уже выполняется')
