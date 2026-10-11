@@ -2,7 +2,7 @@
 import hashlib
 from typing import Literal
 from pydantic import Field
-from .schemas import Strict, ResearchReport
+from .schemas import Strict, ResearchReport, EvidenceItem
 from .db import Session, Run
 from .prompts import GUARD
 
@@ -149,6 +149,53 @@ BASIS_POLICIES = {
 class BaseAnswers(Strict):
     answers: list[CriterionAnswer]
 
+class CitationRepairResult(Strict):
+    evidence: list[EvidenceItem]
+    answers: list[CriterionAnswer]
+    limitations: list[str]
+
+
+def repair_citation_losses(pipeline, company_id, wanted):
+    """Recheck only lost criteria against saved pages; never browse or relax quotes."""
+    from .db import Company
+    from .evidence import verify_report, normalized_signals
+    with Session() as db:
+        run=db.get(Run,pipeline.id);company=db.get(Company,company_id)
+        if run.config.get('methodology_version')!='campaign-v1':return False
+        base=company.research.get('base',{})
+        criteria=run.reports['campaign_plan']['base_criteria']+run.reports['campaign_plan']['plan']['criteria']
+        by_id={item['id']:item for item in criteria}
+        answers={item['criterion_id']:item for item in company.profile.get('base_research',{}).get('answers',[])}
+        previous=set(base.get('citation_repair_attempts',[]))
+        requested=sorted(set(wanted)&set(base.get('citation_losses',[]))&set(by_id)-previous)
+        requested=[cid for cid in requested if answers.get(cid,{}).get('status')!='confirmed']
+        pages=base.get('pages',[])
+        if not requested or not pages:return False
+        # One bounded call per company. The original pages remain the evidence source.
+        selected_pages=[{**page,'text':page['text'][:32000]} for page in pages[:3] if page.get('subject_id')==company_id and page.get('publisher_id')=='company:'+company_id]
+        if not selected_pages:return False
+        name=company.name;as_of=run.config['research_as_of'];days=run.config['social_forum_days']
+    prompt=GUARD+'''Восстанови ТОЛЬКО указанные потерянные ответы по сохранённым страницам. Каждый evidence.quote должен быть одним непрерывным буквальным фрагментом одной страницы, без «...», «[…]», добавленных кавычек и склейки частей. Если для утверждения нужны несколько фрагментов, создай отдельный evidence для каждого. Ответ формулируй только в пределах этих цитат; иначе status=unknown. Не ищи источники и не делай выводов о потребности в услуге. Не добавляй другие критерии.'''
+    result=pipeline.ask('extraction',prompt,{'company':name,'criteria':[by_id[cid] for cid in requested],'pages':selected_pages,'date':as_of},CitationRepairResult,max_output=2600,company_id=company_id)
+    checked=verify_report(ResearchReport(summary='Перепроверка цитат',evidence=result.evidence,signals=[],contradictions=[],limitations=result.limitations),selected_pages,'website',days,as_of=as_of,company_id=company_id)
+    mapping={item.id:hashlib.sha256((item.url+'\n'+' '.join(item.quote.split())).encode()).hexdigest()[:24] for item in result.evidence}
+    rewritten=[answer.model_copy(update={'evidence_ids':[mapping.get(eid,eid) for eid in answer.evidence_ids]}) for answer in result.answers]
+    fresh=validate_answers(rewritten,[by_id[cid] for cid in requested],checked['evidence'])
+    recovered={item['criterion_id']:item for item in fresh if item['status']=='confirmed'}
+    with Session() as db:
+        company=db.get(Company,company_id)
+        base=dict(company.research.get('base',{}));base['citation_repair_attempts']=sorted(set(base.get('citation_repair_attempts',[]))|set(requested))
+        base['citation_losses']=sorted(set(base.get('citation_losses',[]))-set(recovered))
+        repair_key='base_repair_'+hashlib.sha256(','.join(requested).encode()).hexdigest()[:12]
+        company.research={**company.research,'base':base,repair_key:{**checked,'criteria':requested,'state':'COMPLETE','page_urls':[p['url'] for p in selected_pages]}}
+        old={item['criterion_id']:item for item in company.profile.get('base_research',{}).get('answers',[])}
+        old.update(recovered)
+        all_evidence=[e for report in company.research.values() for e in report.get('evidence',[])]
+        raw_signals=[signal for report in company.research.values() for signal in report.get('signals',[])]
+        company.profile={**company.profile,'base_research':{**company.profile.get('base_research',{}),'answers':list(old.values())},'signals':normalized_signals(raw_signals+criterion_signals(list(old.values()),all_evidence))}
+        db.commit()
+    return bool(recovered)
+
 
 def complete_base_answers(pipeline, company_id):
     """Answer the shared research contract from validated facts, without web searches."""
@@ -200,7 +247,7 @@ def research_base(pipeline,cid,fetch):
         criteria=contract['base_criteria']+contract['plan']['criteria']
         resource=c.resource;name=c.name
         state=dict(c.research.get('base',{}));pages=list(state.get('pages',[]));attempted=list(state.get('attempted_urls',[]));errors=list(state.get('errors',[]))
-        answers=state.get('answers',[]);evidence=state.get('evidence',[]);signals=state.get('signals',[])
+        answers=state.get('answers',[]);evidence=state.get('evidence',[]);signals=state.get('signals',[]);citation_losses=set(state.get('citation_losses',[]))
         if c.context.get('identity_conflict') or resource.startswith('unresolved:') or social(resource):
             c.identity='NEEDS_REVIEW';c.stage='PROFILE_READY';c.group='NEEDS_REVIEW';c.reason='Базовый проход требует подтверждённого сайта';db.commit();return
     queue=[resource]
@@ -235,12 +282,14 @@ def research_base(pipeline,cid,fetch):
         mapping={e.id:hashlib.sha256((e.url+'\n'+' '.join(e.quote.split())).encode()).hexdigest()[:24] for e in result.report.evidence}
         rewritten=[a.model_copy(update={'evidence_ids':[mapping.get(i,i) for i in a.evidence_ids]}) for a in result.answers]
         fresh=validate_answers(rewritten,criteria,checked['evidence'])
+        accepted_by_id={a['criterion_id']:a for a in fresh}
+        citation_losses.update(a.criterion_id for a in rewritten if a.status=='confirmed' and accepted_by_id[a.criterion_id]['status']=='unknown')
         prior={a['criterion_id']:a for a in answers}
         for a in fresh:
             if a['status']=='confirmed' or a['criterion_id'] not in prior:prior[a['criterion_id']]=a
-        answers=list(prior.values());evidence=list({e['id']:e for e in evidence+checked['evidence']}.values());signals=normalized_signals(signals+checked['signals'])
+        answers=list(prior.values());citation_losses.difference_update(a['criterion_id'] for a in answers if a['status']=='confirmed');evidence=list({e['id']:e for e in evidence+checked['evidence']}.values());signals=normalized_signals(signals+checked['signals'])
         attempted.append(url);queue.extend(links(page))
-        state={'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'summary':'Базовый сбор по критериям','limitations':checked['limitations'],'contradictions':checked['contradictions']}
+        state={'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'citation_losses':sorted(citation_losses),'summary':'Базовый сбор по критериям','limitations':checked['limitations'],'contradictions':checked['contradictions']}
         with Session() as db:
             c=db.get(Company,cid);c.research={**c.research,'base':state};db.commit()
     answers=answers or validate_answers([],criteria,[])

@@ -249,6 +249,18 @@ class Pipeline:
             for start in range(0,len(candidates),12):
                 result=self.ask('segmentation',segment_prompt+' Объедини кандидатов со сходной гипотезой; не добавляй новые имена признаков.',{'candidates':merged+candidates[start:start+12],'offers':sender['offers']},segment_schema,max_output=max_tokens)
                 if result.segments:merged=[s.model_dump() for s in result.segments]
+        if campaign_mode and merged:
+            from .campaigns import repair_citation_losses
+            needed={name.removeprefix('criterion_') for candidate in merged for name in candidate['required_signals']+candidate['supporting_signals'] if name.startswith('criterion_')}
+            repaired=False
+            for company in companies:
+                lost=set(company.research.get('base',{}).get('citation_losses',[])) & needed
+                if lost and repair_citation_losses(self,company.id,lost):repaired=True
+            if repaired:
+                with Session() as db:
+                    fresh=db.query(Company).filter(Company.id.in_([c.id for c in companies])).all()
+                    profiles=[{'company_id':c.id,'research_as_of':r.config.get('research_as_of'),'base_research':c.profile.get('base_research',{}),'description':c.profile.get('description',''),'signals':evidence_v3.normalized_signals(c.profile.get('signals',[])),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[]),'coverage_complete':c.profile.get('coverage_complete',True)} for c in fresh if c.profile.get('signals')]
+                matrix=evidence_v3.build_feature_matrix(profiles)
         reviews=[];valid=[];known_signals={s['name'] for p in profiles for s in p['signals']};offer_ids={o['id'] for o in sender['offers']}
         for seg in merged:
             if seg['offer_id'] not in offer_ids or not set(seg['required_signals']+seg['supporting_signals']+seg['contradicting_signals'])<=known_signals:continue

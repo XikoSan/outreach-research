@@ -139,3 +139,116 @@ def test_confirmed_criterion_becomes_common_evidence_backed_signal():
     assert signals[0]['evidence_ids']==['a']
     evidence[0]['subject_verified']=False
     assert criterion_signals(answers,evidence)==[]
+
+
+def test_citation_loss_repairs_from_saved_page_without_new_fetch(client):
+    from app.campaigns import BasePageResult,CitationRepairResult,research_base,repair_citation_losses
+    from app.db import Company
+    from app.pipeline import Pipeline
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        company=db.query(Company).filter_by(run_id=rid).first();cid=company.id
+        db.commit()
+    page_text='Products include lifts. Schools use lifts. Hospitals use lifts.'
+    fetches=[]
+    def fetch(url):
+        fetches.append(url)
+        return {'url':url,'text':page_text,'links':[]}
+    def item(eid,quote,url):
+        return {'id':eid,'url':url,'quote':quote,'published_at':None,'scope':'company','origin':url}
+    class Fake:
+        calls=[]
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            self.calls.append(schema)
+            url=payload['pages'][0]['url']
+            if schema is BasePageResult:
+                return BasePageResult(report={'summary':'Products','evidence':[item('good','Products include lifts.',url),item('bad','Schools use lifts. [...] Hospitals use lifts.',url)],'signals':[],'contradictions':[],'limitations':[]},answers=[{'criterion_id':'products','status':'confirmed','answer':'Products include lifts.','evidence_ids':['good']},{'criterion_id':'audiences','status':'confirmed','answer':'Schools and hospitals use lifts.','evidence_ids':['bad']}])
+            if schema is CitationRepairResult:
+                assert [c['id'] for c in payload['criteria']]==['audiences']
+                assert payload['pages'][0]['text']==page_text
+                return CitationRepairResult(evidence=[item('school','Schools use lifts.',url),item('hospital','Hospitals use lifts.',url)],answers=[{'criterion_id':'audiences','status':'confirmed','answer':'Schools and hospitals use lifts.','evidence_ids':['school','hospital']}],limitations=[])
+            raise AssertionError(schema)
+    fake=Fake();pipe=Pipeline(rid,fake)
+    research_base(pipe,cid,fetch)
+    with Session() as db:
+        company=db.get(Company,cid)
+        assert company.research['base']['citation_losses']==['audiences']
+        assert next(a for a in company.profile['base_research']['answers'] if a['criterion_id']=='audiences')['status']=='unknown'
+    assert repair_citation_losses(pipe,cid,{'audiences'})
+    assert not repair_citation_losses(pipe,cid,{'audiences'})
+    assert fetches==['https://alpha.example']
+    assert fake.calls==[BasePageResult,CitationRepairResult]
+    with Session() as db:
+        company=db.get(Company,cid)
+        assert company.research['base']['citation_losses']==[]
+        assert {s['name'] for s in company.profile['signals']}=={'criterion_products','criterion_audiences'}
+        assert next(a for a in company.profile['base_research']['answers'] if a['criterion_id']=='audiences')['status']=='confirmed'
+        assert all(e['quote'] in page_text for report in company.research.values() if report.get('criteria')==['audiences'] for e in report['evidence'])
+
+
+def test_segmentation_rechecks_company_with_no_initial_signals(client):
+    from app.campaigns import CampaignSegments,CitationRepairResult
+    from app.schemas import Review
+    from app.evidence import VERSION as EVIDENCE_VERSION
+    from app.db import Company
+    from app.pipeline import Pipeline
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        companies=db.query(Company).filter_by(run_id=rid).order_by(Company.id).all()
+        first,second=companies
+        for company in companies:company.identity='CONFIRMED';company.stage='PROFILE_READY'
+        def ev(eid,quote):
+            return {'id':eid,'url':first.resource,'quote':quote,'scope':'company','origin':first.resource,'subject_verified':True,'current':True,'validation_version':EVIDENCE_VERSION}
+        first.research={'base':{'evidence':[ev('p','Company sells technical products.'),ev('a','Schools use these products.')], 'signals':[]}}
+        first.profile={'signals':[{'name':'criterion_products','state':'confirmed','confidence':'HIGH','evidence_ids':['p'],'explanation':'Products'},{'name':'criterion_audiences','state':'confirmed','confidence':'HIGH','evidence_ids':['a'],'explanation':'Schools'}],'base_research':{'answers':[]}}
+        second.research={'base':{'pages':[{'url':second.resource,'text':'Company sells technical products. Schools use these products.','subject_id':second.id,'publisher_id':'company:'+second.id}],'evidence':[],'signals':[],'citation_losses':['products','audiences']}}
+        second.profile={'signals':[],'base_research':{'answers':[{'criterion_id':cid,'status':'unknown','answer':'Не установлено','evidence_ids':[]} for cid in ('products','audiences')]}}
+        second_id=second.id
+        db.commit()
+    class Fake:
+        calls=[]
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            self.calls.append(schema)
+            if schema is CampaignSegments:
+                assert len(payload['profiles'])==1
+                return CampaignSegments(segments=[{'id':'candidate','name':'Shared products','definition':'Several products for schools','offer_id':'research','hypothesis':'The service may be applicable','confidence':'MEDIUM','required_signals':['criterion_products','criterion_audiences'],'supporting_signals':[],'contradicting_signals':[],'outreach_angle':'Research selection criteria','diagnostic_question':'Relevant?','allowed_claims':[],'forbidden_claims':[],'basis_type':'applicability','cooperation_proposal':'Research buyer selection criteria','next_step':'Discuss research scope','shared_message':'We can research selection criteria','event_signals':[]}])
+            if schema is CitationRepairResult:
+                url=payload['pages'][0]['url']
+                assert url=='https://alpha.example' or url=='https://beta.example'
+                return CitationRepairResult(evidence=[{'id':'p','url':url,'quote':'Company sells technical products.','published_at':None,'scope':'company','origin':url},{'id':'a','url':url,'quote':'Schools use these products.','published_at':None,'scope':'company','origin':url}],answers=[{'criterion_id':'products','status':'confirmed','answer':'Technical products','evidence_ids':['p']},{'criterion_id':'audiences','status':'confirmed','answer':'Schools use the products','evidence_ids':['a']}],limitations=[])
+            if schema is Review:
+                assert len(payload['profiles'])==2
+                return Review(passed=True,issues=[])
+            raise AssertionError(schema)
+    fake=Fake();Pipeline(rid,fake).segment()
+    assert fake.calls==[CampaignSegments,CitationRepairResult,Review]
+    with Session() as db:
+        run=db.get(Run,rid)
+        assert len(run.segments)==1
+        second=db.get(Company,second_id)
+        assert {s['name'] for s in second.profile['signals']}=={'criterion_products','criterion_audiences'}
+        assert run.reports['segmentation']['diagnostics']['profiles_with_signals']==2
+
+
+def test_citation_repair_does_not_trust_unbound_saved_page(client):
+    from app.campaigns import repair_citation_losses
+    from app.db import Company
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        company=db.query(Company).filter_by(run_id=rid).first();cid=company.id
+        company.profile={'base_research':{'answers':[{'criterion_id':'products','status':'unknown','answer':'Не установлено','evidence_ids':[]}]},'signals':[]}
+        company.research={'base':{'pages':[{'url':'https://unbound.example','text':'Products include lifts.'}],'citation_losses':['products']}}
+        db.commit()
+    class NoCalls:
+        id=rid
+        def ask(self,*args,**kwargs):raise AssertionError('Unbound page must not reach a paid model call')
+    assert not repair_citation_losses(NoCalls(),cid,{'products'})
