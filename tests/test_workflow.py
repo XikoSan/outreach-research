@@ -61,6 +61,53 @@ def test_social_pages_not_merged_by_host():
     assert canonical_resource('https://vk.com/alpha')!=canonical_resource('https://vk.com/beta')
     assert canonical_resource('https://vk.com') is None
     assert canonical_resource('https://user:password@example.com') is None
+    assert canonical_resource('https://linkedin.com/in/person',True) is None
+    assert canonical_resource('https://youtube.com/watch?v=123',True) is None
+    assert canonical_resource('https://x.com/brand/status/123',True) is None
+    assert canonical_resource('https://youtu.be/abc123',True) is None
+
+def test_corporate_social_fallback_uses_all_supported_columns(client):
+    headers=['Название компании','Ссылка на сайт','Telegram компании','Instagram компании','LinkedIn сотрудника компании']
+    rows=[
+        ['Альфа',None,'https://t.me/alpha','https://instagram.com/alpha','https://linkedin.com/in/person'],
+        ['Альфа',None,'https://t.me/alpha',None,None],
+        ['Бета',None,None,'https://instagram.com/beta',None],
+        ['Гамма',None,None,None,'https://linkedin.com/in/person'],
+    ]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    run=response.json();assert run['row_count']==4 and run['company_count']==3
+    with Session() as db:
+        companies={c.name:c for c in db.query(Company).filter_by(run_id=run['id'])}
+        assert companies['Альфа'].resource=='https://t.me/alpha'
+        assert companies['Альфа'].context['socials']==['https://t.me/alpha','https://instagram.com/alpha']
+        assert companies['Бета'].resource=='https://instagram.com/beta'
+        assert companies['Гамма'].group=='NEEDS_REVIEW'
+
+
+def test_official_page_and_x_company_headers_are_supported(client):
+    headers=['Название компании','Ссылка на сайт','Официальная страница компании','X компании']
+    rows=[['Дельта',None,'https://www.tiktok.com/@delta','https://x.com/delta']]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    with Session() as db:
+        company=db.query(Company).filter_by(run_id=response.json()['id']).one()
+        assert company.resource=='https://tiktok.com/@delta'
+        assert company.context['socials']==['https://tiktok.com/@delta','https://x.com/delta']
+
+
+def test_website_stays_anchor_and_later_social_links_are_preserved(client):
+    headers=['Название компании','Ссылка на сайт','Соцсети компании','Имя']
+    rows=[
+        ['Альфа','https://alpha.example/about','https://t.me/alpha','Первый'],
+        ['Альфа','http://www.alpha.example/products','https://youtube.com/@alpha https://instagram.com/alpha','Второй'],
+    ]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    run=response.json();assert run['row_count']==2 and run['company_count']==1
+    with Session() as db:
+        company=db.query(Company).filter_by(run_id=run['id']).one()
+        assert company.resource=='https://alpha.example'
+        assert company.context['socials']==['https://t.me/alpha','https://youtube.com/@alpha','https://instagram.com/alpha']
+        assert db.query(SourceRow).filter_by(run_id=run['id'],company_id=company.id).count()==2
+
 
 def fixtures():
     signals=[{'name':'products','state':'confirmed','confidence':'HIGH','evidence_ids':['a']},{'name':'audiences','state':'confirmed','confidence':'HIGH','evidence_ids':['b']}]

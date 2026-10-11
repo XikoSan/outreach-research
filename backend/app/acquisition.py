@@ -4,12 +4,11 @@ from .db import Session, Run, Company
 from .schemas import Discovery
 from .prompts import DISCOVERY
 from .llm import RunPaused
-
-SOCIAL_HOSTS=('vk.com','t.me','telegram.me','linkedin.com','ok.ru','youtube.com','instagram.com','facebook.com')
+from .workbooks import SOCIAL
 
 def social(url):
     host=(urlsplit(url).hostname or '').lower()
-    return any(host==h or host.endswith('.'+h) for h in SOCIAL_HOSTS)
+    return any(host==h or host.endswith('.'+h) for h in SOCIAL)
 
 def prepare(pipeline,cid,config,sender,fetch):
     with Session() as db:
@@ -46,6 +45,8 @@ def prepare(pipeline,cid,config,sender,fetch):
             url=link['url']
             if social(url):sources['social'].append(url);official_socials.append(url)
             elif urlsplit(url).hostname==host and any(x in (url+' '+link['label']).lower() for x in ('about','contact','product','service','company','услуг','продукт','компан','контакт')):sources['website'].append(url)
+    for source in context.get('socials',[]):
+        if social(source):sources['social'].append(source)
     for source in found.sources:sources[source.direction].append(source.url)
     for d in sources:sources[d]=list(dict.fromkeys(sources[d]))
     plan={'discovery':found.model_dump(),'sources':sources,'initial_page':initial,'official_socials':official_socials,

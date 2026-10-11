@@ -9,7 +9,10 @@ from openpyxl import load_workbook, Workbook
 from .db import Company, SourceRow, Export, uid
 
 EMPTY = {'', '-', '—', 'нет', 'null', 'none', 'n/a', 'nan'}
-SOCIAL = {'vk.com','vkontakte.ru','linkedin.com','facebook.com','instagram.com','t.me','telegram.me','ok.ru','youtube.com','youtu.be','x.com','twitter.com'}
+SOCIAL = {'vk.com','vkontakte.ru','linkedin.com','facebook.com','instagram.com','t.me','telegram.me','ok.ru','youtube.com','x.com','twitter.com','tiktok.com','pinterest.com','threads.net','dzen.ru','zen.yandex.ru','rutube.ru'}
+SOCIAL_LABELS = ('соцсет', 'соц сет', 'социальн', 'профил', 'страниц', 'social', 'profile', 'page', 'vk', 'вк', 'vkontakte', 'linkedin', 'линкедин', 'telegram', 'телеграм', 'instagram', 'инстаграм', 'facebook', 'фейсбук', 'однокласс', 'youtube', 'ютуб', 'twitter', 'твиттер', 'x.com', 'tiktok', 'тикток', 'pinterest', 'пинтерест', 'threads', 'dzen', 'дзен', 'rutube', 'рутуб')
+COMPANY_LABELS = ('компан', 'организац', 'бренд', 'официальн', 'company', 'corporate', 'business', 'official')
+PERSON_LABELS = ('сотрудник', 'контактного лица', 'личн', 'персональн', 'менеджер', 'директор', 'руководител', 'employee', 'contact person', 'personal', 'manager', 'owner', 'founder', 'ceo')
 SHARED = {'yandex.ru','ya.ru','2gis.ru','google.com','maps.google.com','tilda.ws','wixsite.com'}
 
 def clean(v):
@@ -22,16 +25,53 @@ def canonical_resource(value, social=False):
     value=re.split(r'[\s;,]+',value)[0]
     try:
         p=urlsplit(value if '://' in value else 'https://'+value)
-        host=(p.hostname or '').lower().removeprefix('www.').encode('idna').decode()
+        host=(p.hostname or '').lower().removeprefix('www.').removeprefix('m.').encode('idna').decode()
         if p.scheme not in ('http','https') or '.' not in host or p.username or p.password or p.port not in (None,80,443): return None
         if host in SHARED: return None
         is_social=host in SOCIAL
-        if is_social and not p.path.strip('/'):return None
+        if is_social:
+            parts=p.path.strip('/').split('/')
+            if not parts[0]:return None
+            # Posts, videos and personal LinkedIn profiles are not company pages.
+            excluded={
+                'linkedin.com':{'in','posts','feed'},
+                'youtube.com':{'watch','shorts','playlist','live'},
+                'instagram.com':{'p','reel','stories'},
+                'facebook.com':{'watch','photo','posts','reel'},
+                'vk.com':{'wall','feed'},
+                't.me':{'c','joinchat'},
+                'telegram.me':{'c','joinchat'},
+                'pinterest.com':{'pin'},
+                'x.com':{'home','i','search'},
+                'twitter.com':{'home','i','search'},
+            }
+            if parts[0].casefold() in excluded.get(host,set()):return None
+            if host in {'vk.com','vkontakte.ru'} and parts[0].casefold().startswith('wall'):return None
+            if host in {'x.com','twitter.com','tiktok.com'} and len(parts)>1:return None
+            if host in {'t.me','telegram.me'} and parts[0].startswith('+'):return None
         # Retain full tenant paths on corporate social resources.
         path=p.path.rstrip('/') if is_social else ''
         if social and not is_social:return None
         return urlunsplit(('https',host,path,'',''))
     except (ValueError,UnicodeError):return None
+
+def corporate_social_columns(headers):
+    """Only company-labelled social fields may supply a provisional identity anchor."""
+    return [i for i, header in enumerate(headers)
+            if (label := header.casefold().replace('ё', 'е'))
+            and (any(token in label for token in SOCIAL_LABELS) or bool(re.search(r'(?<![a-zа-я0-9])x(?![a-zа-я0-9])',label)))
+            and any(token in label for token in COMPANY_LABELS)
+            and not any(token in label for token in PERSON_LABELS)]
+
+def corporate_socials(cells, columns):
+    links=[]
+    for index in columns:
+        cell=cells[index]
+        value=clean(cell.hyperlink.target if cell.hyperlink else cell.value)
+        for part in re.split(r'[\s;,|]+',value):
+            url=canonical_resource(part,True)
+            if url and url not in links:links.append(url)
+    return links
 
 def fingerprint(cells):
     vals=[]
@@ -73,6 +113,7 @@ def import_rows(db,run):
     wb,sheets=preflight(run.source_path)
     companies={};rows_out=[]
     for ws,headers,names,name_col,rows in sheets:
+        social_columns=corporate_social_columns(headers)
         def val(cells,*keys):
             for k in keys:
                 if k.casefold() in names:
@@ -83,12 +124,19 @@ def import_rows(db,run):
         for cells in rows:
             name=clean(cells[name_col].value) or 'Компания не указана'
             website=canonical_resource(val(cells,'Ссылка на сайт','Website','Сайт'))
-            social=canonical_resource(val(cells,'VK компании'),True) or canonical_resource(val(cells,'LinkedIn компании'),True)
+            socials=corporate_socials(cells,social_columns)
+            # A social profile entered in the website field is still a social anchor.
+            if website and canonical_resource(website,True):
+                socials=list(dict.fromkeys([website,*socials]))
+                website=None
+            social=socials[0] if socials else None
             resource=website or social or 'unresolved:'+uid()
             if resource not in companies:
-                c=Company(id=uid(),run_id=run.id,name=name,resource=resource,context={'names':[name],'description':val(cells,'Описание'),'socials':[s for s in [canonical_resource(val(cells,'VK компании'),True),canonical_resource(val(cells,'LinkedIn компании'),True)] if s]},identity='UNVERIFIED' if website or social else 'NEEDS_REVIEW',group='NOT_PROCESSED' if website or social else 'NEEDS_REVIEW',reason='' if website or social else 'Нет подтверждаемого сайта или корпоративной соцстраницы')
+                c=Company(id=uid(),run_id=run.id,name=name,resource=resource,context={'names':[name],'description':val(cells,'Описание'),'socials':socials},identity='UNVERIFIED' if website or social else 'NEEDS_REVIEW',group='NOT_PROCESSED' if website or social else 'NEEDS_REVIEW',reason='' if website or social else 'Нет подтверждаемого сайта или корпоративной соцстраницы')
                 companies[resource]=c
             c=companies[resource]
+            if socials:
+                c.context={**c.context,'socials':list(dict.fromkeys([*c.context.get('socials',[]),*socials]))}
             legal=val(cells,'ИНН','Tax ID','ИНН компании')
             if legal:
                 ids=list(dict.fromkeys(c.context.get('legal_ids',[])+[legal]));c.context={**c.context,'legal_ids':ids,'identity_conflict':len(ids)>1}

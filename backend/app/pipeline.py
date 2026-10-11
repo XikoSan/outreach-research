@@ -122,7 +122,7 @@ class Pipeline:
                         return
                     with Session() as db:
                         c=db.get(Company,company_id);c.identity='CONFIRMED';c.reason=found.identity_reason;db.commit()
-                    if not any(h in (urlsplit(resource).hostname or '') for h in ('vk.com','linkedin.com')):sources=[resource]+sources
+                    if not acquisition.social(resource):sources=[resource]+sources
                 if direction=='social' and not plan:sources=context.get('socials',[])+sources
                 state={'discovery':found.model_dump() if found else {},'state':'DISCOVERED','sources':list(dict.fromkeys(sources))[:limit],'pages':[],'errors':[],'attempted_urls':[],'limited':limited}
                 with Session() as db:

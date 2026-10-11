@@ -10,6 +10,8 @@ from app.schemas import ResearchReport, Review
 from app.evidence import verify_report,preserve_synthesis,build_feature_matrix
 from app.rules import classify_with_trace
 from app.pipeline import Pipeline
+from app.acquisition import prepare as prepare_sources, social as is_social
+from app.schemas import Discovery
 from app.jobs import ensure_jobs,claim,execute_jobs
 from app.llm import UncertainCall,RunPaused
 from app.crawler import parse_page
@@ -76,6 +78,23 @@ def test_source_first_single_discovery_and_durable_chunks(client,monkeypatch):
         assert run.status=='COMPLETED'
         c=db.query(Company).filter_by(run_id=rid).first();assert c.research['website']['chunks'];assert c.profile['classification']['trace']
         assert db.query(CompanyJob).filter_by(run_id=rid,state='COMPLETE').count()==2
+
+
+def test_corporate_social_from_workbook_is_separate_unverified_source(client):
+    rid=v3_run(client)
+    with Session() as db:
+        company=db.query(Company).filter_by(run_id=rid,name='Alpha').one()
+        company.context={**company.context,'socials':['https://t.me/alpha','https://x.com/alpha']}
+        cid=company.id;config=dict(db.get(Run,rid).config);db.commit()
+    class FakePipeline:
+        id=rid
+        def ask(self,*args,**kwargs):
+            return Discovery(identity_confirmed=True,identity_quote='',identity_reason='Site supplied in workbook',products='',sources=[])
+    plan=prepare_sources(FakePipeline(),cid,config,{'offers':[]},lambda url:{'url':url,'text':'Alpha makes industrial equipment.','links':[]})
+    assert is_social('https://x.com/alpha')
+    assert plan['identity_confirmed']
+    assert plan['sources']['social']==['https://t.me/alpha','https://x.com/alpha']
+    assert plan['official_socials']==[]
 
 
 def test_retry_preserves_successful_reports_and_history(client,monkeypatch):
