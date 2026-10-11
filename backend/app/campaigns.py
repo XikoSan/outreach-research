@@ -245,7 +245,7 @@ def research_base(pipeline,cid,fetch):
         run=db.get(Run,pipeline.id);c=db.get(Company,cid)
         contract=run.reports['campaign_plan'];config=dict(run.config)
         criteria=contract['base_criteria']+contract['plan']['criteria']
-        resource=c.resource;name=c.name
+        resource=c.resource;name=c.name;legal_names=c.context.get('legal_names',[])
         state=dict(c.research.get('base',{}));pages=list(state.get('pages',[]));attempted=list(state.get('attempted_urls',[]));errors=list(state.get('errors',[]))
         answers=state.get('answers',[]);evidence=state.get('evidence',[]);signals=state.get('signals',[]);citation_losses=set(state.get('citation_losses',[]))
         if c.context.get('identity_conflict') or resource.startswith('unresolved:') or social(resource) or resource in c.context.get('socials',[]):
@@ -279,7 +279,7 @@ def research_base(pipeline,cid,fetch):
         # Persist the fetched page before any paid work, to survive extraction failure.
         with Session() as db:
             c=db.get(Company,cid);c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals}};db.commit()
-        result=pipeline.ask('extraction',GUARD+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL страницы. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.',{'company':name,'criteria':criteria,'pages':[page],'date':config['research_as_of']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
+        result=pipeline.ask('extraction',GUARD+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL страницы. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.',{'company':name,'legal_names':legal_names,'criteria':criteria,'pages':[page],'date':config['research_as_of']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
         checked=verify_report(result.report,[page],'website',config['social_forum_days'],as_of=config['research_as_of'],company_id=cid)
         import hashlib
         mapping={e.id:hashlib.sha256((e.url+'\n'+' '.join(e.quote.split())).encode()).hexdigest()[:24] for e in result.report.evidence}

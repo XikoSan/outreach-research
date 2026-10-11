@@ -4,16 +4,16 @@ from openpyxl import Workbook
 
 from app.db import Company, Run, Session
 from app.entity_audit import audit_import
-from app.entity_repair import restore_missing_legal_metadata, restore_missing_social_metadata
+from app.entity_repair import restore_missing_legal_metadata, restore_missing_legal_names, restore_missing_social_metadata
 
 
 def _workbook():
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(['Название компании', 'Ссылка на сайт', 'ИНН', 'Имя', 'VK компании'])
-    sheet.append(['Альфа', 'https://alpha.example', '1001', 'Контакт 1', 'https://vk.com/alpha'])
-    sheet.append(['Альфа', 'http://www.alpha.example/about', '1001', 'Контакт 2', 'https://vk.com/alpha_team'])
-    sheet.append(['Бета', 'https://beta.example', '2002', 'Контакт 3', None])
+    sheet.append(['Название компании', 'Ссылка на сайт', 'ИНН', 'Имя', 'VK компании', 'Юридическое название компании'])
+    sheet.append(['Альфа', 'https://alpha.example', '1001', 'Контакт 1', 'https://vk.com/alpha', 'ООО АЛЬФА'])
+    sheet.append(['Альфа', 'http://www.alpha.example/about', '1001', 'Контакт 2', 'https://vk.com/alpha_team', 'ООО АЛЬФА'])
+    sheet.append(['Бета', 'https://beta.example', '2002', 'Контакт 3', None, 'ООО БЕТА'])
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -35,24 +35,29 @@ def test_audit_and_restore_legacy_legal_metadata_without_changing_assignments(cl
         assert before['multi_row_groups'] == 1
         assert before['groups_with_multiple_legal_ids_in_source'] == 0
         assert before['groups_missing_stored_legal_ids'] == 0
+        assert before['groups_missing_stored_legal_names'] == 0
         for company in db.query(Company).filter_by(run_id=run_id):
             context = {key: value for key, value in company.context.items()
-                       if key not in ('legal_ids', 'identity_conflict')}
+                       if key not in ('legal_ids', 'legal_names', 'identity_conflict')}
             if company.resource == 'https://alpha.example':
                 context['socials'] = ['https://vk.com/alpha']
             company.context = context
         db.commit()
         missing_report = audit_import(db, run_id)
         assert missing_report['groups_missing_stored_legal_ids'] == 2
+        assert missing_report['groups_missing_stored_legal_names'] == 2
         assert missing_report['groups_missing_stored_social_links'] == 1
         assert restore_missing_legal_metadata(db, run_id) == 2
+        assert restore_missing_legal_names(db, run_id) == 2
         assert restore_missing_social_metadata(db, run_id) == 1
         db.commit()
         after = audit_import(db, run_id)
         assert after['row_integrity_ok']
         assert after['groups_missing_stored_legal_ids'] == 0
+        assert after['groups_missing_stored_legal_names'] == 0
         assert after['groups_missing_stored_social_links'] == 0
         assert restore_missing_legal_metadata(db, run_id) == 0
+        assert restore_missing_legal_names(db, run_id) == 0
         assert restore_missing_social_metadata(db, run_id) == 0
         assert {
             company.id: (company.resource, company.group, company.stage, company.identity)

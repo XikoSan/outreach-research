@@ -2,7 +2,7 @@
 from collections import defaultdict
 
 from .db import Company, Run, SourceRow
-from .entity_audit import LEGAL_HEADERS, _cell_field, audit_import
+from .entity_audit import LEGAL_HEADERS, LEGAL_NAME_HEADERS, _cell_field, audit_import
 from .workbooks import preflight
 
 
@@ -78,4 +78,39 @@ def restore_missing_social_metadata(db, run_id):
     for company_id, links in missing.items():
         company = db.get(Company, company_id)
         company.context = {**company.context, 'socials': [*company.context.get('socials', []), *links]}
+    return len(missing)
+
+
+def missing_legal_names(db, run_id):
+    report = audit_import(db, run_id)
+    if not report['row_integrity_ok'] or report['groups_with_different_stored_legal_names']:
+        raise ValueError('Import integrity or stored legal names require manual review')
+    run = db.get(Run, run_id)
+    workbook, sheets = preflight(run.source_path)
+    names_by_coordinate = {
+        (sheet.title, cells[0].row): _cell_field(cells, headers, LEGAL_NAME_HEADERS)
+        for sheet, headers, _, _, sheet_rows in sheets
+        for cells in sheet_rows
+    }
+    workbook.close()
+    names_by_company = defaultdict(set)
+    for row in db.query(SourceRow).filter_by(run_id=run_id):
+        value = names_by_coordinate[(row.sheet, row.row_index)]
+        if value:
+            names_by_company[row.company_id].add(value)
+    missing = {}
+    for company in db.query(Company).filter_by(run_id=run_id):
+        values = names_by_company[company.id]
+        if values and not company.context.get('legal_names'):
+            missing[company.id] = sorted(values)
+    if len(missing) != report['groups_missing_stored_legal_names']:
+        raise ValueError('Import changed during legal-name audit')
+    return missing
+
+
+def restore_missing_legal_names(db, run_id):
+    missing = missing_legal_names(db, run_id)
+    for company_id, names in missing.items():
+        company = db.get(Company, company_id)
+        company.context = {**company.context, 'legal_names': names}
     return len(missing)

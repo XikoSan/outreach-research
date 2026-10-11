@@ -123,6 +123,7 @@ def import_rows(db,run):
             return ''
         for cells in rows:
             name=clean(cells[name_col].value) or 'Компания не указана'
+            legal_name=val(cells,'Юридическое название компании','Legal company name','Legal name')
             website=canonical_resource(val(cells,'Ссылка на сайт','Website','Сайт'))
             socials=corporate_socials(cells,social_columns)
             # A social profile entered in the website field is still a social anchor.
@@ -141,6 +142,8 @@ def import_rows(db,run):
             if legal:
                 ids=list(dict.fromkeys(c.context.get('legal_ids',[])+[legal]));c.context={**c.context,'legal_ids':ids,'identity_conflict':len(ids)>1}
             if name not in c.context['names']:c.context={**c.context,'names':[*c.context['names'],name]}
+            if legal_name and legal_name not in c.context.get('legal_names',[]):
+                c.context={**c.context,'legal_names':[*c.context.get('legal_names',[]),legal_name]}
             rows_out.append(SourceRow(id=uid(),run_id=run.id,company_id=c.id,sheet=ws.title,row_index=cells[0].row,fingerprint=fingerprint(cells),display_fields=[{'column':cell.column,'name':str(headers[cell.column-1] or f'Колонка {cell.column}'),'value':str(cell.value) if cell.value is not None else ''} for cell in cells]))
     db.add_all(companies.values());db.flush();db.add_all(rows_out)
     run.row_count=len(rows_out);run.company_count=len(companies)

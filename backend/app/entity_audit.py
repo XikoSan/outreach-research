@@ -9,6 +9,7 @@ from .db import Company, Run, SourceRow
 from .workbooks import clean, corporate_social_columns, corporate_socials, fingerprint, preflight
 
 LEGAL_HEADERS = ('инн', 'tax id', 'инн компании')
+LEGAL_NAME_HEADERS = ('юридическое название компании', 'legal company name', 'legal name')
 
 
 def _cell_field(cells, headers, names):
@@ -50,6 +51,7 @@ def audit_import(db, run_id):
         (sheet.title, cells[0].row): {
             'fingerprints': (fingerprint(cells), _legacy_fingerprint(cells)),
             'legal': _cell_field(cells, headers, LEGAL_HEADERS),
+            'legal_name': _cell_field(cells, headers, LEGAL_NAME_HEADERS),
             'socials': corporate_socials(cells, corporate_social_columns(headers)),
         }
         for sheet, headers, _, _, sheet_rows in sheets
@@ -63,6 +65,9 @@ def audit_import(db, run_id):
 
     conflict_groups = 0
     missing_legal_context_groups = 0
+    missing_legal_name_groups = 0
+    mismatched_legal_name_groups = 0
+    groups_with_legal_names = 0
     incorrect_conflict_flags = 0
     context_legal_mismatches = 0
     groups_with_legal_ids = 0
@@ -79,6 +84,12 @@ def audit_import(db, run_id):
         groups_with_legal_ids += bool(legal_ids)
         if len(legal_ids) > 1:
             conflict_groups += 1
+        legal_names = {source_rows.get((row.sheet, row.row_index), {}).get('legal_name', '')
+                       for row in stored_by_company[company.id]} - {''}
+        context_names = set(company.context.get('legal_names', []))
+        groups_with_legal_names += bool(legal_names)
+        missing_legal_name_groups += bool(legal_names and not context_names)
+        mismatched_legal_name_groups += bool(context_names and context_names != legal_names)
         context_ids = set(company.context.get('legal_ids', []))
         if legal_ids and not context_ids:
             missing_legal_context_groups += 1
@@ -125,6 +136,9 @@ def audit_import(db, run_id):
         'groups_with_legal_ids_in_source': groups_with_legal_ids,
         'groups_with_multiple_legal_ids_in_source': conflict_groups,
         'groups_missing_stored_legal_ids': missing_legal_context_groups,
+        'groups_with_legal_names_in_source': groups_with_legal_names,
+        'groups_missing_stored_legal_names': missing_legal_name_groups,
+        'groups_with_different_stored_legal_names': mismatched_legal_name_groups,
         'groups_with_different_stored_legal_ids': context_legal_mismatches,
         'groups_with_incorrect_conflict_flag': incorrect_conflict_flags,
         'legal_ids_across_multiple_resources': sum(len(resources) > 1 for resources in legal_on_different_resources.values()),

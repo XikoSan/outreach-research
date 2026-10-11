@@ -7,8 +7,8 @@ from pathlib import Path
 
 from app.db import Session, engine
 from app.entity_audit import audit_import
-from app.entity_repair import (missing_legal_metadata, missing_social_metadata,
-                               restore_missing_legal_metadata, restore_missing_social_metadata)
+from app.entity_repair import (missing_legal_metadata, missing_legal_names, missing_social_metadata,
+                               restore_missing_legal_metadata, restore_missing_legal_names, restore_missing_social_metadata)
 
 
 def backup_sqlite():
@@ -31,18 +31,22 @@ def main():
     with Session() as db:
         missing_legal = missing_legal_metadata(db, args.run_id)
         missing_social = missing_social_metadata(db, args.run_id)
+        missing_names = missing_legal_names(db, args.run_id)
         result = {'run_id': args.run_id, 'legal_groups_to_restore': len(missing_legal),
-                  'social_groups_to_restore': len(missing_social), 'applied': False}
-        if args.apply and (missing_legal or missing_social):
+                  'social_groups_to_restore': len(missing_social),
+                  'legal_name_groups_to_restore': len(missing_names), 'applied': False}
+        if args.apply and (missing_legal or missing_social or missing_names):
             backup = backup_sqlite()
             legal_count = restore_missing_legal_metadata(db, args.run_id) if missing_legal else 0
             social_count = restore_missing_social_metadata(db, args.run_id) if missing_social else 0
+            name_count = restore_missing_legal_names(db, args.run_id) if missing_names else 0
             db.commit()
             after = audit_import(db, args.run_id)
-            if after['groups_missing_stored_legal_ids'] or after['groups_missing_stored_social_links']:
+            if (after['groups_missing_stored_legal_ids'] or after['groups_missing_stored_social_links']
+                    or after['groups_missing_stored_legal_names']):
                 raise RuntimeError('Metadata repair did not pass post-check')
             result.update({'applied': True, 'legal_groups_restored': legal_count,
-                           'social_groups_restored': social_count, 'backup': str(backup)})
+                           'social_groups_restored': social_count, 'legal_name_groups_restored': name_count, 'backup': str(backup)})
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
