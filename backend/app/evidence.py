@@ -3,6 +3,7 @@ import hashlib
 import re
 from datetime import date, datetime, timedelta, timezone
 from .rules import origin
+from urllib.parse import urlsplit, urlunsplit
 
 VERSION = 'evidence-v3'
 ALIASES = {'multiple_products':'multiple_product_lines', 'many_product_lines':'multiple_product_lines',
@@ -27,14 +28,19 @@ def normalized_signals(signals):
         old['evidence_ids']=sorted(set(old['evidence_ids']+value['evidence_ids']))
     return [groups[key] for key in sorted(groups)]
 
+def page_key(url):
+    """Only normalize equivalent root paths; preserve scheme, query and other paths."""
+    parts=urlsplit(url)
+    return urlunsplit((parts.scheme.lower(),parts.netloc.lower(),parts.path or '/',parts.query,''))
+
 def verify_report(report,pages,direction,days,*,as_of,company_id):
     reference=date.fromisoformat(as_of[:10]);accepted=[];mapping={};issues=[]
-    by_url={p['url']:p for p in pages}
+    by_url={page_key(p['url']):p for p in pages}
     for e in report.evidence:
-        page=by_url.get(e.url);quote=' '.join(e.quote.split())
+        page=by_url.get(page_key(e.url));quote=' '.join(e.quote.split())
         text=' '.join(page['text'].split()) if page else ''
         if not page or len(quote)<15 or quote not in text:
-            issues.append('Доказательство отклонено: точная цитата отсутствует');continue
+            issues.append('Доказательство отклонено: ' + ('страница не найдена' if not page else 'точная цитата отсутствует'));continue
         data=e.model_dump();published=None
         basis=data.get('date_evidence','').strip()
         if e.published_at and basis and (basis in text or basis in page.get('date_metadata',[])):

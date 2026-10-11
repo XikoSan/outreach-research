@@ -276,8 +276,13 @@ def generate_package(pid,gateway=None):
         payload={'segment':p.segment_snapshot,'sender':sender,'research_context':p.context_snapshot.get('prepared_text') or p.context_snapshot.get('source_text') or p.context_snapshot.get('summary',''),'recipient_type':p.recipient_type,'next_step':p.next_step,'contacts':len(p.selection['row_ids'])}
         prompt=p.prompt;review=p.review
     gw=gateway or Gateway(rid,package_id=pid)
+    campaign_instructions=''
+    if payload['segment'].get('basis_type'):
+        from .campaigns import campaign_prompt_contract
+        payload['campaign_contract']=campaign_prompt_contract(payload['segment'],payload['next_step'])
+        campaign_instructions=' Для всей группы сохрани campaign_contract: единое предложение, аргументацию и следующий шаг. Меняются только допустимые факты персонализации. Для applicability не утверждай наличие проблемы, потребности, потерь или неэффективности. Не придумывай индивидуальные офферы. Перенеси ограничения и тип основания в самостоятельный документ промпта.'
     if not prompt:
-        result=gw.ask('prompt',PROMPT+' Тип person означает обращение к сотруднику, company — к ответственному представителю компании без выдуманного имени. Используй выбранный следующий шаг. Если данные отправителя пустые, не придумывай их. Предложение формулируй на основе research_context и гипотезы сегмента.',payload,PromptResult,max_output=7000)
+        result=gw.ask('prompt',PROMPT+campaign_instructions+' Тип person означает обращение к сотруднику, company — к ответственному представителю компании без выдуманного имени. Используй выбранный следующий шаг. Если данные отправителя пустые, не придумывай их. Предложение формулируй на основе research_context и гипотезы сегмента.',payload,PromptResult,max_output=7000)
         prompt=result.text
         if not all(x in prompt for x in ('INPUT_ROW_DATA','Письмо 1','Письмо 2','Письмо 3','Письмо 4')):raise ValueError('Промпт не прошёл структурную проверку')
         representative=payload['sender'].get('representative','').strip()
@@ -285,7 +290,7 @@ def generate_package(pid,gateway=None):
         with Session() as db:
             p=db.get(PromptPackage,pid);p.prompt=prompt;p.stage='REVIEW';db.commit()
     if not review.get('passed'):
-        checked=gw.ask('synthesis',REVIEW,{**payload,'review_kind':'prompt','prompt':prompt},Review,max_output=3000)
+        checked=gw.ask('synthesis',REVIEW+campaign_instructions,{**payload,'review_kind':'prompt','prompt':prompt},Review,max_output=3000)
         with Session() as db:
             p=db.get(PromptPackage,pid);p.review=checked.model_dump();db.commit()
         if not checked.passed:raise ValueError('Промпт не принят проверкой: '+'; '.join(checked.issues))

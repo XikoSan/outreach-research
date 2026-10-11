@@ -205,16 +205,22 @@ class Pipeline:
         with Session() as db:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
+            campaign_mode=r.config.get('methodology_version')=='campaign-v1'
             source_filters=r.config.get('source_filters','');sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
             query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
             if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
             companies=query.all()
-            profiles=[{'company_id':c.id,'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[]),'coverage_complete':c.profile.get('coverage_complete',True)} for c in companies if c.profile.get('signals')]
+            profiles=[{'company_id':c.id,'research_as_of':r.config.get('research_as_of'),'base_research':c.profile.get('base_research',{}),'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[]),'coverage_complete':c.profile.get('coverage_complete',True)} for c in companies if c.profile.get('signals')]
         v3=r.config.get('pipeline_version',1)>=3
+        segment_prompt,review_prompt,segment_schema,classifier=SEGMENT,REVIEW,Segments,classify_with_trace
+        if campaign_mode:
+            from .campaigns import CAMPAIGN_PROMPT,CAMPAIGN_REVIEW,CampaignSegments,classify_campaign
+            segment_prompt,review_prompt,segment_schema,classifier=CAMPAIGN_PROMPT,CAMPAIGN_REVIEW,CampaignSegments,classify_campaign
+            sender['offers']=r.reports['campaign_plan']['plan']['offers']
         matrix=evidence_v3.build_feature_matrix(profiles) if v3 else None
         if v3:
             for p in profiles:p['signals']=evidence_v3.normalized_signals(p['signals'])
-        candidates=[]
+        candidates=[];generation_notes=[];targeted_requests=[]
         # Bounded discovery batches. A final merge considers candidate definitions globally.
         batches=[];batch=[];size=0
         strategy_profiles=evidence_v3.feature_patterns(profiles) if v3 else profiles
@@ -224,13 +230,25 @@ class Pipeline:
             batch.append(p);size+=length
         if batch:batches.append(batch)
         for batch in batches if sender['offers'] else []:
-            result=self.ask('segmentation',SEGMENT,{'profiles':batch,'input_kind':'feature_patterns' if v3 else 'profiles','offers':sender['offers'],'source_filters':source_filters},Segments,max_output=max_tokens)
+            result=self.ask('segmentation',segment_prompt,{'profiles':batch,'input_kind':'feature_patterns' if v3 else 'profiles','offers':sender['offers'],'source_filters':source_filters},segment_schema,max_output=max_tokens)
             candidates.extend(x.model_dump() for x in result.segments)
-        # Incremental global consolidation remains bounded for large datasets.
-        merged=[]
-        for start in range(0,len(candidates),12):
-            result=self.ask('segmentation',SEGMENT+' Объедини кандидатов со сходной гипотезой; не добавляй новые имена признаков.',{'candidates':merged+candidates[start:start+12],'offers':sender['offers']},Segments,max_output=max_tokens)
-            merged=[s.model_dump() for s in result.segments]
+            if campaign_mode:targeted_requests.extend(result.research_requests)
+            generation_notes.append({'abstention_reason':result.abstention_reason,'missing_data':result.missing_data,'candidate_count':len(result.segments)})
+        if campaign_mode and targeted_requests:
+            from .targeted import perform_targeted
+            if perform_targeted(self,targeted_requests,candidates,fetch):
+                with Session() as db:
+                    for p in profiles:
+                        c=db.get(Company,p['company_id'])
+                        p.update(signals=c.profile.get('signals',[]),evidence=evidence_for(c),base_research=c.profile.get('base_research',{}))
+                matrix=evidence_v3.build_feature_matrix(profiles)
+        # A single discovery batch has already compared its candidates globally.
+        # For multiple batches, an abstaining merge must not erase candidates.
+        merged=candidates
+        if len(batches)>1 and len(candidates)>1:
+            for start in range(0,len(candidates),12):
+                result=self.ask('segmentation',segment_prompt+' Объедини кандидатов со сходной гипотезой; не добавляй новые имена признаков.',{'candidates':merged+candidates[start:start+12],'offers':sender['offers']},segment_schema,max_output=max_tokens)
+                if result.segments:merged=[s.model_dump() for s in result.segments]
         reviews=[];valid=[];known_signals={s['name'] for p in profiles for s in p['signals']};offer_ids={o['id'] for o in sender['offers']}
         for seg in merged:
             if seg['offer_id'] not in offer_ids or not set(seg['required_signals']+seg['supporting_signals']+seg['contradicting_signals'])<=known_signals:continue
@@ -239,17 +257,17 @@ class Pipeline:
             if v3:
                 positive=[];negative=[]
                 for p in profiles:
-                    group,reason,trace=classify_with_trace(p,p['evidence'],[seg]);evaluations.append({'company_id':p['company_id'],'trace':trace})
+                    group,reason,trace=classifier(p,p['evidence'],[seg]);evaluations.append({'company_id':p['company_id'],'trace':trace})
                     (positive if group==seg['id'] else negative).append(p)
-                if not positive:continue
+                if len(positive)<(2 if campaign_mode else 1):continue
                 examples=positive[:3]+negative[:2]
-            review=self.ask('segmentation',REVIEW,{'review_kind':'segment','segment':seg,'profiles':examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
+            review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':seg,'profiles':examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
             reviews.append({'segment':seg,'review':review.model_dump(),'evaluations':evaluations})
             if review.passed:
                 signal_labels={s['name']:s['label'] for p in profiles for s in p['signals'] if s.get('label')}
                 valid.append({**seg,'id':f'segment_{len(valid)+1:03d}','signal_labels':signal_labels})
         with Session() as db:
-            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;r.reports={**r.reports,'segmentation':{'candidates':candidates,'reviews':reviews,'feature_matrix':matrix,'created_at':datetime.now(timezone.utc).isoformat()}};log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
+            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;r.reports={**r.reports,'segmentation':{'candidates':candidates,'generation_notes':generation_notes,'targeted_requests':[q.model_dump() for q in targeted_requests],'reviews':reviews,'feature_matrix':matrix,'diagnostics':{'selected_companies':len(companies),'profiles_with_signals':len(profiles),'activity_directions':len(sender['offers']),'candidate_count':len(candidates),'rejected_invalid_signal_names':sum(not set(x['required_signals']+x['supporting_signals']+x['contradicting_signals'])<=known_signals for x in merged),'valid_segments':len(valid),'reason':('missing_activity_context' if not sender['offers'] else 'no_profiles_with_signals' if not profiles else 'no_candidates' if not candidates else 'no_valid_segments' if not valid else 'completed')},'created_at':datetime.now(timezone.utc).isoformat()}};log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
     def finish(self):
         self.segment();checkpoint(self.id,'CLASSIFICATION')
         with Session() as db:
@@ -258,7 +276,11 @@ class Pipeline:
             if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
             for c in query:
                 if r.config.get('pipeline_version',1)>=3:
-                    c.group,c.reason,trace=classify_with_trace(c.profile,evidence_for(c),r.segments)
+                    classifier=classify_with_trace
+                    if r.config.get('methodology_version')=='campaign-v1':
+                        from .campaigns import classify_campaign
+                        classifier=classify_campaign
+                    c.group,c.reason,trace=classifier(c.profile,evidence_for(c),r.segments)
                     c.profile={**c.profile,'classification':{'segment_version':r.segmentation_version,'trace':trace}}
                 else:c.group,c.reason=classify(c.profile,evidence_for(c),r.segments)
             db.commit()
@@ -272,13 +294,23 @@ class Pipeline:
         from .context import prepare_context
         prepare_context(self)
         with Session() as db:
-            r=db.get(Run,self.id);ids=[c.id for c in db.query(Company).filter_by(run_id=self.id).order_by(Company.id) if c.stage!='PROFILE_READY' and c.identity!='NEEDS_REVIEW']
+            campaign_mode=db.get(Run,self.id).config.get('methodology_version')=='campaign-v1'
+        if campaign_mode:
+            from .campaigns import prepare_campaign_plan
+            prepare_campaign_plan(self)
+        with Session() as db:
+            r=db.get(Run,self.id);ids=[c.id for c in db.query(Company).filter_by(run_id=self.id).order_by(Company.id) if c.stage not in ('PROFILE_READY','FAILED') and c.identity!='NEEDS_REVIEW']
             maximum=r.config.get('max_companies')
             if maximum:ids=ids[:maximum]
             self.selected_ids=set(ids)
         def perform(cid):
             child=Pipeline(self.id) if r.config.get('pipeline_version',1)>=3 and isinstance(self.gw,Gateway) and not self.injected_gateway else self
-            try:child.research(cid)
+            try:
+                if campaign_mode:
+                    from .campaigns import research_base
+                    research_base(child,cid,fetch)
+                else:
+                    child.research(cid)
             except (BudgetPause,RunPaused,UncertainCall,SearchLimit,AuthenticationError,PermissionDeniedError,NotFoundError):raise
             except Exception as e:
                 with Session() as db:

@@ -342,5 +342,13 @@ def attempts(rid:str,offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100)):
         total=query.count()
         return {'total':total,'items':[{'id':a.id,'operation_id':a.operation_id,'role':c.role,'model':c.model,'state':a.state,'cost':a.cost,'reservation':a.reservation,'metrics':a.metrics,'created_at':a.created_at} for a,c in query.order_by(ModelAttempt.created_at.desc()).offset(offset).limit(limit)]}
 
+@app.get('/api/runs/{rid}/research-plan')
+def research_plan(rid:str):
+    from .campaigns import BASE_CRITERIA, BASIS_POLICIES
+    with Session() as db:
+        run=get(db,Run,rid)
+        saved=run.reports.get('campaign_plan')
+        return {'status':'prepared' if saved else 'not_prepared','active_methodology':run.config.get('methodology_version','legacy'),'plan':saved,'base_criteria':BASE_CRITERIA,'basis_policies':BASIS_POLICIES}
+
 frontend=Path(__file__).resolve().parents[2]/'frontend'/'dist'
 if frontend.exists():app.mount('/',StaticFiles(directory=frontend,html=True),name='ui')

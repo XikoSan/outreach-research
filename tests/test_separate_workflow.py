@@ -169,3 +169,25 @@ def test_new_research_without_budget_keeps_import_filters_and_server_models(clie
     assert run['config']['models']==models()
     assert run['config']['max_companies'] is None
     assert client.patch('/api/runs/'+run['id']+'/budget',json={'budget':1}).status_code in (404,405)
+
+
+def test_campaign_contract_reaches_prompt_and_review(client,monkeypatch):
+    r,_=research(client,monkeypatch)
+    with Session() as db:
+        run=db.get(Run,r['id']);run.segments=[{**run.segments[0],'basis_type':'applicability','cooperation_proposal':'Исследование критериев выбора покупателей','shared_message':'Общее предложение исследования для производителей','next_step':'Исходный шаг'}];db.commit()
+    response=package(client,r['id']);assert response.status_code==200
+    pid=response.json()['id']
+    with Session() as db:p=db.get(PromptPackage,pid);p.status='RUNNING';db.commit()
+    captured=[]
+    class Capture(FakeGateway):
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            captured.append((role,instructions,payload))
+            return super().ask(role,instructions,payload,schema,**kwargs)
+    generate_package(pid,Capture())
+    assert len(captured)==2
+    for _,instructions,payload in captured:
+        c=payload['campaign_contract']
+        assert c['basis_type']=='applicability'
+        assert c['next_step']=='Обсудить задачу на встрече'
+        assert c['cooperation_proposal']=='Исследование критериев выбора покупателей'
+        assert 'не утверждай наличие проблемы' in instructions

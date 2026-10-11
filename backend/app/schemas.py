@@ -27,6 +27,9 @@ class SenderProfile(Strict):
     materials: str = ''
     offers: list[Offer] = Field(default_factory=list)
 class RunConfig(Strict):
+    methodology_version: Literal['legacy','campaign-v1'] = 'legacy'
+    max_targeted_research_queries: int = Field(default=3, ge=0, le=3)
+    max_targeted_research_pages: int = Field(default=5, ge=0, le=5)
     max_search_queries: int = Field(default=6, ge=1, le=20)
     max_website_pages: int = Field(default=8, ge=1, le=30)
     max_external_sources: int = Field(default=8, ge=1, le=30)
@@ -96,6 +99,8 @@ class Segment(Strict):
     forbidden_claims: list[str]
 class Segments(Strict):
     segments: list[Segment]
+    abstention_reason: str = ''
+    missing_data: list[str] = Field(default_factory=list)
 class Review(Strict):
     passed: bool
     issues: list[str]

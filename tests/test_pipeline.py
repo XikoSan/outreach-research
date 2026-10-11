@@ -152,3 +152,83 @@ def test_methodology_context_and_evidence_reach_models(client,monkeypatch):
         if schema is Review:
             assert payload['review_kind']=='segment'
             assert all('evidence' in p for p in payload['profiles'])
+
+
+def test_invalid_response_repairs_once_and_reuses_both_calls(client):
+    rid=new_run(client);g=gateway(rid)
+    valid=g.client.responses.create.return_value
+    invalid=SimpleNamespace(id='invalid',usage=valid.usage,output=[],output_text='{"passed":',incomplete_details=SimpleNamespace(reason='max_output_tokens'))
+    g.client.responses.create.side_effect=[invalid,valid]
+    assert g.ask('extraction','check',{},Review,max_output=2200).passed
+    assert g.ask('extraction','check',{},Review,max_output=2200).passed
+    assert g.client.responses.create.call_count==2
+    assert g.client.responses.create.call_args.kwargs['max_output_tokens']==4400
+    with Session() as db:
+        calls=db.query(ModelCall).all();r=db.get(Run,rid)
+        assert len(calls)==2
+        assert r.spent==pytest.approx(sum(c.cost for c in calls))
+        assert r.reserved==pytest.approx(0)
+        assert any(c.metrics.get('validation_failure',{}).get('raw_response')=='{"passed":' for c in calls)
+
+
+def test_repair_failure_is_bounded_and_cached(client):
+    from app.llm import InvalidStructuredResponse
+    rid=new_run(client);g=gateway(rid)
+    g.client.responses.create.return_value.output_text='invalid'
+    for _ in range(2):
+        with pytest.raises(InvalidStructuredResponse):g.ask('extraction','check',{},Review)
+    assert g.client.responses.create.call_count==2
+
+
+def test_segmentation_uses_research_document_without_sender_offers(client,monkeypatch):
+    rid=new_run(client)
+    with Session() as db:
+        r=db.get(Run,rid)
+        r.sender_snapshot={}
+        r.context_snapshot={'name':'Marketing','summary':'Исследование рынков и позиционирования'}
+        db.commit()
+    monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
+    g=FakeGateway();Pipeline(rid,g).execute()
+    assert 'segmentation' in g.roles
+    with Session() as db:
+        r=db.get(Run,rid)
+        assert r.segments
+        assert r.reports['segmentation']['diagnostics']['activity_directions']==1
+        assert r.reports['segmentation']['diagnostics']['reason']=='completed'
+
+
+def test_failed_companies_require_explicit_retry(client,monkeypatch):
+    rid=new_run(client,pilot=1)
+    with Session() as db:
+        failed=db.query(Company).filter_by(run_id=rid).order_by(Company.id).first()
+        failed.stage='FAILED';failed.group='FAILED';failed_id=failed.id;db.commit()
+    monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
+    Pipeline(rid,FakeGateway()).execute()
+    with Session() as db:
+        assert db.get(Company,failed_id).stage=='FAILED'
+        assert db.query(Company).filter_by(run_id=rid,stage='PROFILE_READY').count()==1
+
+
+def test_legacy_truncated_result_gets_larger_repair_limit(client):
+    rid=new_run(client);g=gateway(rid)
+    g.ask('extraction','check',{},Review,max_output=2200)
+    with Session() as db:
+        call=db.query(ModelCall).one();call.result=None;call.metrics={'output_tokens':2200};db.commit()
+    assert g.ask('extraction','check',{},Review,max_output=2200).passed
+    assert g.client.responses.create.call_count==2
+    assert g.client.responses.create.call_args.kwargs['max_output_tokens']==4400
+
+
+def test_empty_segments_preserve_actionable_reason(client,monkeypatch):
+    rid=new_run(client);monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
+    class NoCandidates(FakeGateway):
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            if schema is Segments:
+                return Segments(segments=[],abstention_reason='Нет независимого подтверждения гипотезы',missing_data=['Проверить первичный внешний источник'])
+            return super().ask(role,instructions,payload,schema,**kwargs)
+    Pipeline(rid,NoCandidates()).execute()
+    with Session() as db:
+        report=db.get(Run,rid).reports['segmentation']
+        assert report['diagnostics']['reason']=='no_candidates'
+        assert report['generation_notes'][0]['abstention_reason']=='Нет независимого подтверждения гипотезы'
+        assert report['generation_notes'][0]['missing_data']==['Проверить первичный внешний источник']
