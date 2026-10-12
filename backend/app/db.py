@@ -41,7 +41,6 @@ class Run(Base):
     created_at: Mapped[str] = mapped_column(String, default=now)
 class Company(Base):
     __tablename__ = 'companies'
-    __table_args__ = (UniqueConstraint('run_id', 'resource'),)
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
     run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'), index=True)
     name: Mapped[str] = mapped_column(String)

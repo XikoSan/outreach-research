@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from .db import Company, Run, SourceRow
-from .workbooks import clean, corporate_social_columns, corporate_socials, fingerprint, preflight
+from .workbooks import clean, corporate_social_columns, corporate_socials, fingerprint, normalize_inn, preflight
 
 LEGAL_HEADERS = ('инн', 'tax id', 'инн компании')
 LEGAL_NAME_HEADERS = ('юридическое название компании', 'legal company name', 'legal name')
@@ -50,7 +50,7 @@ def audit_import(db, run_id):
     source_rows = {
         (sheet.title, cells[0].row): {
             'fingerprints': (fingerprint(cells), _legacy_fingerprint(cells)),
-            'legal': _cell_field(cells, headers, LEGAL_HEADERS),
+            'legal': normalize_inn(_cell_field(cells, headers, LEGAL_HEADERS)),
             'legal_name': _cell_field(cells, headers, LEGAL_NAME_HEADERS),
             'socials': corporate_socials(cells, corporate_social_columns(headers)),
         }
@@ -90,12 +90,12 @@ def audit_import(db, run_id):
         groups_with_legal_names += bool(legal_names)
         missing_legal_name_groups += bool(legal_names and not context_names)
         mismatched_legal_name_groups += bool(context_names and context_names != legal_names)
-        context_ids = set(company.context.get('legal_ids', []))
+        context_ids = {normalize_inn(value) for value in company.context.get('legal_ids', [])}
         if legal_ids and not context_ids:
             missing_legal_context_groups += 1
         if context_ids and context_ids != legal_ids:
             context_legal_mismatches += 1
-        if context_ids and bool(company.context.get('identity_conflict')) != (len(context_ids) > 1):
+        if len(context_ids)>1 and not company.context.get('identity_conflict'):
             incorrect_conflict_flags += 1
         for legal_id in legal_ids:
             legal_on_different_resources[legal_id].add(company.resource)

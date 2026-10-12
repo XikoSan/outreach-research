@@ -201,9 +201,11 @@ def retry(rid:str,payload:RetryRequest):
         for c in cs:
             from .revisions import prepare_retry
             prepare_retry(c)
-            if c.resource.startswith('unresolved:'):
+            if c.resource.startswith('unresolved:') or c.context.get('identity_conflict'):
                 c.identity='NEEDS_REVIEW';c.group='NEEDS_REVIEW';c.stage='IDENTITY'
-                c.reason='Нет сайта или официальной социальной сети: повтор требует уточнения исходных данных'
+                c.reason=('Неоднозначная принадлежность контактов или общего ресурса: уточните исходную базу'
+                          if c.context.get('identity_conflict') else
+                          'Нет сайта или официальной социальной сети: повтор требует уточнения исходных данных')
         if cs:
             history=list((r.reports or {}).get('segmentation_history',[]))
             if r.segmentation_version or r.segments:
@@ -227,7 +229,8 @@ def companies(rid:str,offset:int=Query(0,ge=0),limit:int=Query(40,ge=1,le=100),g
 def company(cid:str):
     with Session() as db:
         c=get(db,Company,cid)
-        return company_view(c,db.get(Run,c.run_id),detail=True)
+        return {**company_view(c,db.get(Run,c.run_id),detail=True),
+                'contact_count':db.query(SourceRow).filter_by(company_id=cid).count()}
 
 @app.get('/api/runs/{rid}/events')
 def events(rid:str):

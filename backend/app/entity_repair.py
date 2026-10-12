@@ -3,7 +3,7 @@ from collections import defaultdict
 
 from .db import Company, Run, SourceRow
 from .entity_audit import LEGAL_HEADERS, LEGAL_NAME_HEADERS, _cell_field, audit_import
-from .workbooks import preflight
+from .workbooks import normalize_inn, preflight
 
 
 def missing_legal_metadata(db, run_id):
@@ -15,7 +15,7 @@ def missing_legal_metadata(db, run_id):
     run = db.get(Run, run_id)
     workbook, sheets = preflight(run.source_path)
     legal_by_coordinate = {
-        (sheet.title, cells[0].row): _cell_field(cells, headers, LEGAL_HEADERS)
+        (sheet.title, cells[0].row): normalize_inn(_cell_field(cells, headers, LEGAL_HEADERS))
         for sheet, headers, _, _, sheet_rows in sheets
         for cells in sheet_rows
     }

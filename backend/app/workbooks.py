@@ -1,5 +1,5 @@
 """Immutable workbook registry and verified row-preserving partition export."""
-import hashlib, json, re, shutil, zipfile
+import hashlib, json, re, shutil, unicodedata, zipfile
 from copy import copy
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -109,43 +109,115 @@ def preflight(path):
     if not data:raise ValueError('В файле нет строк контактов')
     return wb,data
 
+def company_name_key(value):
+    """Use the displayed company name, ignoring case, punctuation and legal-form prefix."""
+    value=unicodedata.normalize('NFKC',clean(value)).casefold().replace('ё','е')
+    value=re.sub(r'^(?:(?:ооо|оао|зао|пао|ао|ип|llc|ltd)\s+)+','',value)
+    return ' '.join(re.findall(r'[a-zа-я0-9]+',value))
+
+def normalize_inn(value):
+    value=clean(value).replace('\xa0','').strip()
+    if re.fullmatch(r'\d+\.0',value):value=value[:-2]
+    value=re.sub(r'[\s-]+','',value)
+    return value if value.isdigit() else value.casefold()
+
 def import_rows(db,run):
     wb,sheets=preflight(run.source_path)
-    companies={};rows_out=[]
+    entries=[]
     for ws,headers,names,name_col,rows in sheets:
         social_columns=corporate_social_columns(headers)
         def val(cells,*keys):
-            for k in keys:
-                if k.casefold() in names:
-                    c=cells[names[k.casefold()]]
-                    v=clean(c.hyperlink.target if c.hyperlink else c.value)
-                    if v:return v
+            for key in keys:
+                if key.casefold() in names:
+                    cell=cells[names[key.casefold()]]
+                    value=clean(cell.hyperlink.target if cell.hyperlink else cell.value)
+                    if value:return value
             return ''
         for cells in rows:
             name=clean(cells[name_col].value) or 'Компания не указана'
-            legal_name=val(cells,'Юридическое название компании','Legal company name','Legal name')
             website=canonical_resource(val(cells,'Ссылка на сайт','Website','Сайт'))
             socials=corporate_socials(cells,social_columns)
-            # A social profile entered in the website field is still a social anchor.
             if website and canonical_resource(website,True):
-                socials=list(dict.fromkeys([website,*socials]))
-                website=None
-            social=socials[0] if socials else None
-            resource=website or social or 'unresolved:'+uid()
-            if resource not in companies:
-                c=Company(id=uid(),run_id=run.id,name=name,resource=resource,context={'names':[name],'description':val(cells,'Описание'),'socials':socials},identity='UNVERIFIED' if website or social else 'NEEDS_REVIEW',group='NOT_PROCESSED' if website or social else 'NEEDS_REVIEW',reason='' if website or social else 'Нет подтверждаемого сайта или корпоративной соцстраницы')
-                companies[resource]=c
-            c=companies[resource]
-            if socials:
-                c.context={**c.context,'socials':list(dict.fromkeys([*c.context.get('socials',[]),*socials]))}
-            legal=val(cells,'ИНН','Tax ID','ИНН компании')
-            if legal:
-                ids=list(dict.fromkeys(c.context.get('legal_ids',[])+[legal]));c.context={**c.context,'legal_ids':ids,'identity_conflict':len(ids)>1}
-            if name not in c.context['names']:c.context={**c.context,'names':[*c.context['names'],name]}
-            if legal_name and legal_name not in c.context.get('legal_names',[]):
-                c.context={**c.context,'legal_names':[*c.context.get('legal_names',[]),legal_name]}
-            rows_out.append(SourceRow(id=uid(),run_id=run.id,company_id=c.id,sheet=ws.title,row_index=cells[0].row,fingerprint=fingerprint(cells),display_fields=[{'column':cell.column,'name':str(headers[cell.column-1] or f'Колонка {cell.column}'),'value':str(cell.value) if cell.value is not None else ''} for cell in cells]))
-    db.add_all(companies.values());db.flush();db.add_all(rows_out)
+                socials=list(dict.fromkeys([website,*socials]));website=None
+            name_key=company_name_key(name)
+            if not name_key or name=='Компания не указана':name_key=f'unknown:{ws.title}:{cells[0].row}'
+            entries.append({'name':name,'name_key':name_key,
+                'inn':normalize_inn(val(cells,'ИНН','Tax ID','ИНН компании')),
+                'legal_name':val(cells,'Юридическое название компании','Legal company name','Legal name'),
+                'website':website,'socials':socials,'description':val(cells,'Описание'),
+                'sheet':ws.title,'row_index':cells[0].row,'cells':cells,'headers':headers})
+    groups=[];by_name=defaultdict(list);by_name_inn={}
+    def new_group(entry):
+        group={'name_key':entry['name_key'],'inn':entry['inn'],'entries':[],'ambiguous':False}
+        groups.append(group);by_name[entry['name_key']].append(group)
+        return group
+    # Resolve rows with an INN first, so blank-INN rows can be assigned independent of row order.
+    for entry in entries:
+        if not entry['inn']:continue
+        key=(entry['name_key'],entry['inn'])
+        group=by_name_inn.get(key)
+        if group is None:
+            group=new_group(entry);by_name_inn[key]=group
+        group['entries'].append(entry)
+    blank_groups={}
+    for entry in entries:
+        if entry['inn']:continue
+        candidates=[group for group in by_name[entry['name_key']] if group['inn']]
+        group=None
+        if len(candidates)==1:
+            group=candidates[0]
+            known_sites={item['website'] for item in group['entries'] if item['website']}
+            if entry['website'] and known_sites and entry['website'] not in known_sites:
+                group['ambiguous']=True
+        elif len(candidates)>1:
+            links=set(([entry['website']] if entry['website'] else [])+entry['socials'])
+            matches=[candidate for candidate in candidates if links & {
+                link for item in candidate['entries'] for link in
+                (([item['website']] if item['website'] else [])+item['socials'])}]
+            if len(matches)==1:group=matches[0]
+        if group is None:
+            group=blank_groups.get(entry['name_key'])
+            if group is None:
+                group=new_group(entry);blank_groups[entry['name_key']]=group
+            if len(candidates)>1:group['ambiguous']=True
+        group['entries'].append(entry)
+    prepared=[];by_resource=defaultdict(list)
+    for group in groups:
+        members=group['entries']
+        websites=list(dict.fromkeys(item['website'] for item in members if item['website']))
+        socials=list(dict.fromkeys(link for item in members for link in item['socials']))
+        resource=(websites or socials or ['unresolved:'+uid()])[0]
+        if not group['inn'] and len(websites)>1:group['ambiguous']=True
+        prepared.append((group,websites,socials,resource))
+        if not resource.startswith('unresolved:'):by_resource[resource].append(group)
+    companies=[];rows_out=[]
+    for group,websites,socials,resource in prepared:
+        members=group['entries']
+        shared=len(by_resource.get(resource,[]))>1
+        conflict=group['ambiguous'] or shared
+        names=list(dict.fromkeys(item['name'] for item in members))
+        legal_names=list(dict.fromkeys(item['legal_name'] for item in members if item['legal_name']))
+        legal_ids=list(dict.fromkeys(item['inn'] for item in members if item['inn']))
+        description=next((item['description'] for item in members if item['description']),'')
+        reason=('Один ресурс указан у разных компаний' if shared else
+                'Неоднозначно, к какой компании относится часть контактов' if conflict else
+                'Нет подтверждаемого сайта или корпоративной соцстраницы' if resource.startswith('unresolved:') else '')
+        needs_review=conflict or resource.startswith('unresolved:')
+        company=Company(id=uid(),run_id=run.id,name=names[0],resource=resource,
+            context={'names':names,'legal_names':legal_names,'legal_ids':legal_ids,
+                     'websites':websites,'socials':socials,'description':description,
+                     'identity_conflict':conflict,'grouping_basis':'company_name_inn'},
+            identity='NEEDS_REVIEW' if needs_review else 'UNVERIFIED',
+            group='NEEDS_REVIEW' if needs_review else 'NOT_PROCESSED',reason=reason)
+        companies.append(company)
+        for entry in members:
+            cells=entry['cells'];headers=entry['headers']
+            rows_out.append(SourceRow(id=uid(),run_id=run.id,company_id=company.id,
+                sheet=entry['sheet'],row_index=entry['row_index'],fingerprint=fingerprint(cells),
+                display_fields=[{'column':cell.column,
+                    'name':str(headers[cell.column-1] or f'Колонка {cell.column}'),
+                    'value':str(cell.value) if cell.value is not None else ''} for cell in cells]))
+    db.add_all(companies);db.flush();db.add_all(rows_out)
     run.row_count=len(rows_out);run.company_count=len(companies)
     run.config={**run.config,'sheets':[{'name':w.title,'headers':h,'rows':len(rs)} for w,h,_,_,rs in sheets]}
     wb.close()

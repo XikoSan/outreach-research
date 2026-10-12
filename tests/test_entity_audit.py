@@ -66,7 +66,7 @@ def test_audit_and_restore_legacy_legal_metadata_without_changing_assignments(cl
         assert db.get(Run, run_id).status == 'CREATED'
 
 
-def test_legal_conflict_is_reported_without_automatic_repair(client):
+def test_different_inns_on_same_website_are_separate_companies(client):
     sender_id = client.get('/api/senders').json()[0]['id']
     workbook = Workbook()
     sheet = workbook.active
@@ -79,8 +79,16 @@ def test_legal_conflict_is_reported_without_automatic_repair(client):
                            files={'file': ('conflict.xlsx', output.getvalue())})
     assert response.status_code == 200, response.text
     with Session() as db:
+        companies=db.query(Company).filter_by(run_id=response.json()['id']).all()
+        assert len(companies)==2
+        assert {tuple(c.context['legal_ids']) for c in companies}=={('1001',),('2002',)}
+        assert all(c.resource=='https://alpha.example' for c in companies)
+        assert all(c.group=='NEEDS_REVIEW' for c in companies)
         report = audit_import(db, response.json()['id'])
-        assert report['groups_with_multiple_legal_ids_in_source'] == 1
+        assert report['groups_with_multiple_legal_ids_in_source'] == 0
         assert report['row_integrity_ok']
-        with pytest.raises(ValueError, match='conflicts require review'):
-            restore_missing_legal_metadata(db, response.json()['id'])
+    retried=client.post(f"/api/runs/{response.json()['id']}/retry",json={'groups':['NEEDS_REVIEW']})
+    assert retried.status_code==200
+    with Session() as db:
+        assert all(c.identity=='NEEDS_REVIEW' and c.group=='NEEDS_REVIEW'
+                   for c in db.query(Company).filter_by(run_id=response.json()['id']))

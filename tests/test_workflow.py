@@ -143,3 +143,55 @@ def test_old_social_cannot_be_primary():
 
 def test_cross_origin_write_rejected(client):
     assert client.post('/api/senders',headers={'Origin':'https://untrusted.example'},json={}).status_code==403
+
+def test_company_name_and_inn_group_contacts_across_websites(client):
+    headers=['Название компании','Ссылка на сайт','ИНН','Имя','Телефон','Соцсети компании']
+    rows=[
+        ['ООО «Альфа»','https://alpha.example','7700 123456','Анна','00123','https://t.me/alpha'],
+        ['Альфа','https://alpha-shop.example','7700123456','Борис','00456','https://vk.com/alpha'],
+    ]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    run=response.json();assert (run['row_count'],run['company_count'])==(2,1)
+    with Session() as db:
+        company=db.query(Company).filter_by(run_id=run['id']).one()
+        assert company.context['legal_ids']==['7700123456']
+        assert company.context['websites']==['https://alpha.example','https://alpha-shop.example']
+        assert company.context['socials']==['https://t.me/alpha','https://vk.com/alpha']
+        contacts=db.query(SourceRow).filter_by(company_id=company.id).order_by(SourceRow.row_index).all()
+        assert [next(field['value'] for field in row.display_fields if field['name']=='Телефон') for row in contacts]==['00123','00456']
+    detail=client.get('/api/companies/'+company.id).json()
+    assert detail['contact_count']==2
+    assert detail['websites']==['https://alpha.example','https://alpha-shop.example']
+    assert detail['legal_ids']==['7700123456']
+
+
+def test_name_groups_missing_inn_but_different_names_never_merge_by_website(client):
+    headers=['Название компании','Ссылка на сайт','ИНН','Имя']
+    rows=[
+        ['Альфа','https://shared.example',None,'Анна'],
+        ['Альфа',None,None,'Борис'],
+        ['Бета','https://shared.example',None,'Вера'],
+    ]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    run=response.json();assert (run['row_count'],run['company_count'])==(3,2)
+    with Session() as db:
+        companies={company.name:company for company in db.query(Company).filter_by(run_id=run['id'])}
+        assert db.query(SourceRow).filter_by(company_id=companies['Альфа'].id).count()==2
+        assert db.query(SourceRow).filter_by(company_id=companies['Бета'].id).count()==1
+        assert all(company.group=='NEEDS_REVIEW' for company in companies.values())
+
+
+def test_blank_inn_is_not_assigned_between_conflicting_inns(client):
+    headers=['Название компании','Ссылка на сайт','ИНН','Имя']
+    rows=[
+        ['Альфа',None,None,'Неизвестный контакт'],
+        ['Альфа','https://alpha-one.example','1001','Контакт 1'],
+        ['Альфа','https://alpha-two.example','2002','Контакт 2'],
+    ]
+    response=upload(client,workbook(rows,headers));assert response.status_code==200,response.text
+    run=response.json();assert (run['row_count'],run['company_count'])==(3,3)
+    with Session() as db:
+        companies=db.query(Company).filter_by(run_id=run['id']).all()
+        ambiguous=next(company for company in companies if not company.context['legal_ids'])
+        assert ambiguous.group=='NEEDS_REVIEW'
+        assert db.query(SourceRow).filter_by(company_id=ambiguous.id).count()==1

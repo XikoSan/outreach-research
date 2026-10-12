@@ -37,6 +37,6 @@ def company_view(company,run,detail=False):
     result={k:getattr(company,k) for k in ('id','name','resource','identity','stage','group','reason')}
     result.update(segment=segment,signals=important[:3],evidence_count=len(ev),evidence_state='Достаточно для сегмента' if segment and group==company.group else ('Есть ограничения' if company.group in ATTENTION else 'Исследование не завершено'),evidence_reason=reason,latest_publication=max((e.get('published_at','') or '' for e in ev),default=''))
     if detail:
-        result.update(profile={**company.profile,'signals':signals},signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in reports.items()})
+        result.update(legal_ids=company.context.get('legal_ids',[]),websites=company.context.get('websites',[]),socials=company.context.get('socials',[]),profile={**company.profile,'signals':signals},signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in reports.items()})
     if not detail and segment:result['segment']={k:segment[k] for k in ('id','name','hypothesis')}
     return result
