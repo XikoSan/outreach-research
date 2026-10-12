@@ -62,6 +62,7 @@ def compare(folder):
                                       'reviewer_b_same_message': b['same_message_for_group'],
                                       'adjudicated_decision': '',
                                       'adjudicated_offer_ids': '',
+                                      'adjudicated_same_message': '',
                                       'adjudication_reason': ''})
             if a_decision == b_decision == 'ELIGIBLE':
                 if (a['eligible_offer_ids'].strip().casefold() == b['eligible_offer_ids'].strip().casefold()
@@ -78,6 +79,7 @@ def compare(folder):
                                           'reviewer_b_same_message': b['same_message_for_group'],
                                           'adjudicated_decision': '',
                                           'adjudicated_offer_ids': '',
+                                          'adjudicated_same_message': '',
                                           'adjudication_reason': ''})
         summary[group] = {**dict(counts), 'decision_agreements': counts['decision_agreements'],
                           'eligible_offer_agreements': counts['eligible_offer_agreements']}
