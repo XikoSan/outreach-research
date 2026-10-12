@@ -101,7 +101,16 @@ def reports(rid:str,company_id:str=''):
             c=get(db,Company,company_id)
             if c.run_id!=rid:raise HTTPException(404,'Компания не относится к исследованию')
             result['company']=company_view(c,r,True)
-            result['directions']={direction:{k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations','coverage','termination_reason','validation_version','external_checked')} for direction,report in c.research.items() if direction in selected_directions(r.config)}
+            result['directions']={}
+            for direction,report in c.research.items():
+                if direction not in selected_directions(r.config):continue
+                visible={k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations','coverage','termination_reason','validation_version','external_checked')}
+                if isinstance(visible.get('discovery'),dict):
+                    discovery=visible['discovery']
+                    visible['discovery']={**discovery,
+                        'sources':[source for source in discovery.get('sources',[]) if source.get('direction')==direction],
+                        'checked_directions':[d for d in discovery.get('checked_directions',[]) if d==direction]}
+                result['directions'][direction]=visible
         return result
 
 @router.get('/runs/{rid}/segments')

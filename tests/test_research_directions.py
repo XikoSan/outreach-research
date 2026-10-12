@@ -106,6 +106,11 @@ def test_saved_combined_source_plan_cannot_reintroduce_news(client):
             'discovery':{'identity_confirmed':True,'identity_reason':'saved','products':'',
                          'sources':[{'url':'https://example.org/article','direction':'news_jobs','rationale':'old'}],
                          'checked_directions':['website','news_jobs']}}}
+        company.research={'website':{'state':'COMPLETE','discovery':{
+            'identity_reason':'saved',
+            'sources':[{'url':'https://alpha.example','direction':'website','rationale':'source'},
+                       {'url':'https://example.org/article','direction':'news_jobs','rationale':'old'}],
+            'checked_directions':['website','news_jobs']}}}
         cid=company.id
         db.commit()
     plan=prepare(None,cid,{},None,None)
@@ -113,3 +118,6 @@ def test_saved_combined_source_plan_cannot_reintroduce_news(client):
     assert 'news_jobs' not in plan['sources']
     assert plan['discovery']['sources']==[]
     assert plan['checked_directions']==['website']
+    shown=client.get(f'/api/runs/{rid}/reports?company_id={cid}').json()['directions']
+    assert list(shown)==['website']
+    assert [source['url'] for source in shown['website']['discovery']['sources']]==['https://alpha.example']
