@@ -26,11 +26,17 @@ def compare(folder):
     materials = (folder / 'materials.jsonl').read_bytes()
     if sha256(materials).hexdigest() != manifest['materials_sha256']:
         raise ValueError('Frozen source materials changed')
+    if sha256((folder / 'offer.md').read_bytes()).hexdigest() != manifest['offer_sha256']:
+        raise ValueError('Frozen sender offer changed')
     source = [json.loads(line) for line in materials.splitlines()]
     ids = {record['company_id'] for record in source}
     if len(ids) != manifest['company_count']:
         raise ValueError('Frozen source company count changed')
     reviews = [load_review(folder / f'reviewer_{label}.csv', ids) for label in ('a', 'b')]
+    for record in source:
+        company_id = record['company_id']
+        if any(review[company_id]['sample_group'] != record['sample_group'] for review in reviews):
+            raise ValueError('Reviewer sample group differs from frozen source')
     summary = {}
     disagreements = []
     for group in ('random_core', 'diagnostic'):
@@ -52,11 +58,14 @@ def compare(folder):
                                       'reviewer_b_decision': b_decision,
                                       'reviewer_a_offer_ids': a['eligible_offer_ids'],
                                       'reviewer_b_offer_ids': b['eligible_offer_ids'],
+                                      'reviewer_a_same_message': a['same_message_for_group'],
+                                      'reviewer_b_same_message': b['same_message_for_group'],
                                       'adjudicated_decision': '',
                                       'adjudicated_offer_ids': '',
                                       'adjudication_reason': ''})
             if a_decision == b_decision == 'ELIGIBLE':
-                if a['eligible_offer_ids'].strip() == b['eligible_offer_ids'].strip():
+                if (a['eligible_offer_ids'].strip().casefold() == b['eligible_offer_ids'].strip().casefold()
+                        and a['same_message_for_group'].strip().casefold() == b['same_message_for_group'].strip().casefold()):
                     counts['eligible_offer_agreements'] += 1
                 else:
                     disagreements.append({'company_id': company_id,
@@ -65,6 +74,8 @@ def compare(folder):
                                           'reviewer_b_decision': b_decision,
                                           'reviewer_a_offer_ids': a['eligible_offer_ids'],
                                           'reviewer_b_offer_ids': b['eligible_offer_ids'],
+                                          'reviewer_a_same_message': a['same_message_for_group'],
+                                          'reviewer_b_same_message': b['same_message_for_group'],
                                           'adjudicated_decision': '',
                                           'adjudicated_offer_ids': '',
                                           'adjudication_reason': ''})
