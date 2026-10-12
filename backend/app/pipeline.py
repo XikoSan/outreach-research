@@ -334,7 +334,9 @@ class Pipeline:
             finally:
                 if child is not self and getattr(child.gw,'client',None):child.gw.client.close()
         if r.config.get('pipeline_version',1)>=3:
-            execute_jobs(self.id,ids,perform,1 if self.injected_gateway else min(4,max(1,r.config.get('concurrency',3))))
+            worker_cap = 8 if campaign_mode else 4
+            workers = 1 if self.injected_gateway else min(worker_cap,max(1,r.config.get('concurrency',3)))
+            execute_jobs(self.id,ids,perform,workers)
         else:
             for cid in ids:perform(cid)
         self.finish()

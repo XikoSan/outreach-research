@@ -18,6 +18,7 @@ from openpyxl import Workbook, load_workbook
 from sqlalchemy import func
 
 from app.config import settings
+from app.campaigns import CampaignResearchPlan, VERSION, validate_plan
 from app.db import Company, Run, Session, SourceRow, log, uid
 from app.workbooks import import_rows, SOCIAL
 
@@ -63,6 +64,13 @@ def select_companies(companies, contact_counts, size, seed):
     return core, hard
 
 
+def frozen_plan_for_source(plan, source):
+    if not plan or plan.get('version') != VERSION or plan.get('source_hash') != sha256(source.encode()).hexdigest():
+        raise ValueError('Зафиксированный план не соответствует документу с предложением')
+    validate_plan(CampaignResearchPlan.model_validate(plan['plan']), source, plan['base_criteria'])
+    return deepcopy(plan)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source_run_id')
@@ -70,6 +78,7 @@ def main():
     parser.add_argument('--size', type=int, default=200)
     parser.add_argument('--seed', type=int, default=20261012)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--frozen-plan-from', help='ID запуска с проверенным планом для точного A/B сравнения')
     args = parser.parse_args()
     if not 20 <= args.size <= 300:
         raise SystemExit('Выберите от 20 до 300 компаний')
@@ -79,8 +88,17 @@ def main():
         offer = db.get(Run, args.offer_run_id)
         if not source or not offer or not Path(source.source_path).is_file():
             raise SystemExit('Исходное исследование или контекст не найдены')
-        if not offer.context_snapshot.get('source_text') and not offer.context_snapshot.get('summary'):
+        source_text = offer.context_snapshot.get('source_text') or offer.context_snapshot.get('summary', '')
+        if not source_text:
             raise SystemExit('В выбранном исследовании нет описания предложения')
+        frozen_plan = None
+        if args.frozen_plan_from:
+            plan_run = db.get(Run, args.frozen_plan_from)
+            try:
+                frozen_plan = frozen_plan_for_source(
+                    plan_run.reports.get('campaign_plan') if plan_run else None, source_text)
+            except (ValueError, KeyError) as error:
+                raise SystemExit(str(error)) from error
         companies = db.query(Company).filter_by(run_id=source.id).all()
         counts = dict(db.query(SourceRow.company_id, func.count(SourceRow.id))
                       .filter_by(run_id=source.id).group_by(SourceRow.company_id).all())
@@ -99,7 +117,8 @@ def main():
         row_count = sum(map(len, coordinates.values()))
         preview = {'sampled_companies': len(selected), 'random_core': len(core),
                    'diagnostic_cases': len(hard), 'source_rows': row_count,
-                   'seed': args.seed, 'apply': args.apply}
+                   'seed': args.seed, 'apply': args.apply,
+                   'frozen_plan': bool(frozen_plan)}
         print(json.dumps(preview, ensure_ascii=False))
         if not args.apply:
             return
@@ -145,7 +164,9 @@ def main():
                     reports={'pilot': {'kind': 'base_only', 'source_run_id': source.id,
                                        'offer_run_id': offer.id, 'seed': args.seed,
                                        'random_core_source_ids': [company.id for company in core],
-                                       'diagnostic_source_ids': [company.id for company in hard]}},
+                                       'diagnostic_source_ids': [company.id for company in hard],
+                                       'frozen_plan_run_id': args.frozen_plan_from},
+                             **({'campaign_plan': frozen_plan} if frozen_plan else {})},
                     config=config, status='PAUSED', stage='IMPORTED', budget=0)
         try:
             db.add(pilot)

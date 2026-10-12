@@ -468,3 +468,83 @@ def test_product_buyer_use_link_rejects_unrelated_sentences():
                            facts=[{'value':'Machines | Hospitals | sterilization','evidence_ids':['e']}])
     checked=validate_answers([answer],BASE_CRITERIA,evidence)
     assert checked[0]['status']=='unknown'
+
+
+def test_two_page_batch_keeps_page_provenance_and_rejects_misattributed_quote(client):
+    from app.campaigns import BasePageResult, research_base
+    from app.db import Company
+    from app.pipeline import Pipeline
+
+    rid = new_run(client)
+    with Session() as db:
+        run = db.get(Run, rid)
+        run.config = {**run.config, 'pipeline_version': 3,
+                      'methodology_version': 'campaign-v1',
+                      'research_as_of': '2026-10-10', 'max_website_pages': 2}
+        run.reports = {**run.reports, 'campaign_plan': {
+            'version': 'campaign-v2', 'source_hash': 'test',
+            'plan': {'offers': [], 'criteria': []}, 'base_criteria': BASE_CRITERIA}}
+        cid = db.query(Company).filter_by(run_id=rid).first().id
+        db.commit()
+
+    root = 'https://alpha.example'
+    second = root + '/products'
+    first_text = 'Alpha sells industrial machines.'
+    second_text = 'Manufacturers buy industrial machines for warehouses.'
+    visited = []
+
+    def fetch(url):
+        visited.append(url)
+        return {'url': url, 'text': first_text if url == root else second_text,
+                'links': [{'url': second, 'label': 'Products'}] if url == root else []}
+
+    class Fake:
+        calls = 0
+        def ask(self, role, instructions, payload, schema, **kwargs):
+            assert schema is BasePageResult
+            self.calls += 1
+            assert [page['url'] for page in payload['pages']] == [root, second]
+            assert kwargs['max_output'] == 2 * 5000
+            return BasePageResult(report={
+                'summary': 'Direct site facts',
+                'evidence': [
+                    {'id': 'e1', 'url': root, 'quote': first_text,
+                     'published_at': None, 'scope': 'company', 'origin': root},
+                    {'id': 'e2', 'url': second, 'quote': second_text,
+                     'published_at': None, 'scope': 'company', 'origin': second},
+                    {'id': 'wrong', 'url': root, 'quote': second_text,
+                     'published_at': None, 'scope': 'company', 'origin': root},
+                ], 'signals': [], 'contradictions': [], 'limitations': []},
+                answers=[
+                    {'criterion_id': 'products', 'status': 'confirmed',
+                     'answer': 'industrial machines', 'evidence_ids': ['e1'],
+                     'facts': [{'value': 'industrial machines', 'evidence_ids': ['e1']}]},
+                    {'criterion_id': 'buyer_types', 'status': 'confirmed',
+                     'answer': 'Manufacturers', 'evidence_ids': ['wrong'],
+                     'facts': [{'value': 'Manufacturers', 'evidence_ids': ['wrong']}]},
+                    {'criterion_id': 'application_scenarios', 'status': 'confirmed',
+                     'answer': 'warehouses', 'evidence_ids': ['e2'],
+                     'facts': [{'value': 'warehouses', 'evidence_ids': ['e2']}]},
+                    {'criterion_id': 'product_buyer_use_link', 'status': 'confirmed',
+                     'answer': 'industrial machines | Manufacturers | warehouses',
+                     'evidence_ids': ['e2'], 'facts': [{
+                         'value': 'industrial machines | Manufacturers | warehouses',
+                         'evidence_ids': ['e2']}]},
+                ])
+
+    fake = Fake()
+    research_base(Pipeline(rid, fake), cid, fetch, batch_pages=True)
+    assert visited == [root, second]
+    assert fake.calls == 1
+    with Session() as db:
+        company = db.get(Company, cid)
+        base = company.research['base']
+        answers = {answer['criterion_id']: answer for answer in base['answers']}
+        assert base['batch_pages'] is True
+        assert len(base['pages']) == 2
+        assert len(base['evidence']) == 2
+        assert answers['products']['status'] == 'confirmed'
+        assert answers['buyer_types']['status'] == 'unknown'
+        assert answers['application_scenarios']['status'] == 'confirmed'
+        assert answers['product_buyer_use_link']['status'] == 'confirmed'
+        assert 'buyer_types' in base['citation_losses']

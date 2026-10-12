@@ -53,10 +53,10 @@ def eligible_company_ids(ordered, companies, uncertain_company_ids):
             and by_id[cid].research.get('base', {}).get('state') != 'COMPLETE']
 
 
-def research_one(run_id, company_id):
+def research_one(run_id, company_id, batch_pages=False):
     pipeline = Pipeline(run_id)
     try:
-        research_base(pipeline, company_id, fetch)
+        research_base(pipeline, company_id, fetch, batch_pages=batch_pages)
         with Session() as db:
             losses = set(db.get(Company, company_id).research.get('base', {}).get('citation_losses', []))
         if losses:
@@ -73,14 +73,25 @@ def main():
     parser.add_argument('--concurrency', type=int, default=1)
     parser.add_argument('--max-estimated-usd', type=float, default=0.12)
     parser.add_argument('--max-seconds', type=float, default=1200)
+    parser.add_argument('--batch-pages', action='store_true', help='Эксперимент: один вызов модели на две страницы')
+    parser.add_argument('--start-index', type=int, default=0, help='Смещение в списке ещё не обработанных компаний')
+    parser.add_argument('--experimental-concurrency', action='store_true', help='Разрешить до 12 работников только в отдельном пилоте')
     args = parser.parse_args()
-    if not 1 <= args.company_limit <= 30 or not 1 <= args.concurrency <= 4 or not 0 < args.max_estimated_usd <= 5 or args.max_seconds < 60:
+    max_workers = 12 if args.experimental_concurrency else 4
+    if not 1 <= args.company_limit <= 30 or not 1 <= args.concurrency <= max_workers or not 0 <= args.start_index <= 300 or not 0 < args.max_estimated_usd <= 5 or args.max_seconds < 60:
         raise SystemExit('Unsafe pilot limit')
     with Session() as db:
         run = db.get(Run, args.run_id)
         if not run or run.status != 'PAUSED' or run.reports.get('pilot', {}).get('kind') != 'base_only':
             raise SystemExit('Expected a paused base-only pilot')
         companies = db.query(Company).filter_by(run_id=run.id).all()
+        mode = 'batch2' if args.batch_pages else 'single'
+        previous_mode = run.reports['pilot'].get('base_mode')
+        if previous_mode is None and (db.query(ModelCall).filter_by(run_id=run.id, role='extraction').count()
+                                      or any(company.research.get('base') for company in companies)):
+            previous_mode = 'single'
+        if previous_mode and previous_mode != mode:
+            raise SystemExit('Нельзя смешивать режимы базового прохода в одном пилоте')
         try:
             ordered = pilot_company_ids(run, companies)
         except ValueError as error:
@@ -93,7 +104,10 @@ def main():
             return
         if run.spent >= args.max_estimated_usd:
             raise SystemExit('Estimated pilot spend guard reached')
-        selected = pending[:args.company_limit]
+        selected = pending[args.start_index:args.start_index + args.company_limit]
+        if not selected:
+            raise SystemExit('В выбранном диапазоне нет компаний для пилота')
+        run.reports = {**run.reports, 'pilot': {**run.reports['pilot'], 'base_mode': mode}}
         run.status = 'RUNNING'
         run.error = None
         db.commit()
@@ -114,7 +128,7 @@ def main():
                         problem = 'Estimated pilot spend guard reached'
                         break
                 wave = selected[offset:offset + args.concurrency]
-                futures = [pool.submit(research_one, args.run_id, cid) for cid in wave]
+                futures = [pool.submit(research_one, args.run_id, cid, args.batch_pages) for cid in wave]
                 failures = []
                 for future in futures:
                     try: future.result()
@@ -138,7 +152,7 @@ def main():
             run.error = problem
             pilot = dict(run.reports['pilot'])
             pilot['last_base_batch'] = {'processed': processed, 'seconds': round(monotonic() - started, 1),
-                                        'concurrency': args.concurrency,
+                                        'concurrency': args.concurrency, 'start_index': args.start_index,
                                         'finished_at': datetime.now(timezone.utc).isoformat(), 'error': problem}
             run.reports = {**run.reports, 'pilot': pilot}
             db.commit()

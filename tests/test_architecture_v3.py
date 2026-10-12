@@ -150,7 +150,7 @@ def test_duplicate_job_claim_has_single_owner(client):
     assert sum(c is not None for c in claims)==1
 
 
-@pytest.mark.parametrize('concurrency',[1,2,3,4])
+@pytest.mark.parametrize('concurrency',[1,2,3,4,8])
 def test_queue_identical_results_for_bounded_concurrency(client,concurrency):
     rid=v3_run(client)
     with Session() as db:ids=[c.id for c in db.query(Company).filter_by(run_id=rid)]
@@ -237,3 +237,20 @@ def test_publication_date_parsing_does_not_confuse_update_date():
     assert source_date('Опубликовано 1 октября 2026').isoformat()=='2026-10-01'
     page=parse_page('https://alpha.example','<meta property="article:modified_time" content="2026-10-09"><main>'+'Public text. '*15+'</main>')
     assert page['date_metadata']==[]
+
+
+def test_new_campaign_run_uses_measured_worker_limit_without_changing_legacy(client):
+    context = client.post('/api/contexts', json={
+        'name': 'Offer', 'summary': 'Research products and audiences without promising growth'
+    }).json()
+    source = workbook([['Alpha', 'https://alpha.example', 'a', '1']])
+    campaign = client.post('/api/runs', data={
+        'context_id': context['id'],
+        'config_json': json.dumps({'methodology_version': 'campaign-v1'}),
+    }, files={'file': ('campaign.xlsx', source)})
+    legacy = client.post('/api/runs', data={'context_id': context['id']},
+                         files={'file': ('legacy.xlsx', source)})
+    assert campaign.status_code == legacy.status_code == 200
+    with Session() as db:
+        assert db.get(Run, campaign.json()['id']).config['concurrency'] == 8
+        assert db.get(Run, legacy.json()['id']).config['concurrency'] == 3

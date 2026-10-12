@@ -31,3 +31,20 @@ def test_stratified_pilot_rejects_oversized_sample():
         assert 'больше числа компаний' in str(error)
     else:
         raise AssertionError('Oversized pilot was accepted')
+
+
+def test_frozen_plan_requires_exact_same_offer_document():
+    from hashlib import sha256
+    import pytest
+    from scripts.create_stratified_pilot import frozen_plan_for_source
+    from app.campaigns import VERSION
+
+    source = 'Мы исследуем критерии выбора клиентов.'
+    plan = {'version': VERSION, 'source_hash': sha256(source.encode()).hexdigest(),
+            'base_criteria': [], 'plan': {'offers': [{
+                'id': 'one', 'name': 'Исследование', 'facts': [{
+                    'kind': 'service', 'text': 'Исследуем критерии выбора',
+                    'source_quote': source}]}], 'criteria': []}}
+    assert frozen_plan_for_source(plan, source) == plan
+    with pytest.raises(ValueError):
+        frozen_plan_for_source(plan, source + ' Иное предложение.')

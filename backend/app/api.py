@@ -148,7 +148,7 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=For
     rid=uid();folder=settings.data_dir/'uploads'/rid;folder.mkdir(parents=True)
     path=folder/'source.xlsx';path.write_bytes(content)
     with Session() as db:
-        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged,'source_filters':source_filters.strip(),'pipeline_version':3 if context_id else 1,'research_as_of':now()[:10],'research_revision':1,'concurrency':3 if context_id else 1},budget=0)
+        r=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),sender_snapshot=sender_snapshot,context_snapshot=context_snapshot,config={**config.model_dump(),'models':merged,'source_filters':source_filters.strip(),'pipeline_version':3 if context_id else 1,'research_as_of':now()[:10],'research_revision':1,'concurrency':8 if context_id and config.methodology_version=='campaign-v1' else 3 if context_id else 1},budget=0)
         try:
             db.add(r);db.flush();import_rows(db,r);log(db,r.id,'IMPORTED','База импортирована',metrics={'rows':r.row_count,'companies':r.company_count});db.commit()
         except ValueError as e:db.rollback();shutil.rmtree(folder);raise HTTPException(422,str(e))

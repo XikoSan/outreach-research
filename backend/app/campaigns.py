@@ -385,7 +385,7 @@ def fetch_base_page(fetch, url, resource):
             raise SourceUnavailable(f'{first_error}; www: {second_error}') from second_error
 
 
-def research_base(pipeline,cid,fetch):
+def research_base(pipeline,cid,fetch,*,batch_pages=False):
     from .db import Company
     from .evidence import verify_report, normalized_signals
     from .pipeline import checkpoint
@@ -410,46 +410,71 @@ def research_base(pipeline,cid,fetch):
         return [v['url'] for v in page.get('links',[]) if (urlsplit(v['url']).hostname or '').removeprefix('www.')==host and any(k in (v['url']+' '+v['label']).lower() for k in ('product','service','solution','partner','about','продукт','услуг','решен','партнер','компан'))]
     for page in pages:queue.extend(links(page))
     limit=config['max_website_pages']
+    batch_size=2 if batch_pages else 1
+    def save_progress():
+        with Session() as db:
+            company=db.get(Company,cid)
+            company.research={**company.research,'base':{**state,'pages':pages,
+                'attempted_urls':attempted,'errors':errors,'answers':answers,
+                'evidence':evidence,'signals':signals,'batch_pages':batch_pages}}
+            db.commit()
     while queue and len(attempted)<limit:
         if answers and all(a['status']=='confirmed' for a in answers):break
-        url=queue.pop(0)
-        if url in attempted:continue
-        checkpoint(pipeline.id,'BASE_RESEARCH')
-        page=next((p for p in pages if p['url']==url),None)
-        if page is None:
-            try:page=fetch_base_page(fetch,url,resource)
-            except (SourceUnavailable, TimeoutError, OSError) as exc:
-                attempted.append(url);errors.append({'url':url,'reason':str(exc)[:200]})
-                with Session() as db:
-                    c=db.get(Company,cid);c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals}};db.commit()
-                continue
-            if (urlsplit(page['url']).hostname or '').removeprefix('www.')!=(urlsplit(resource).hostname or '').removeprefix('www.'):
-                attempted.append(url);errors.append({'url':url,'reason':'Неподтверждённый междоменный редирект'});continue
-            page={**page,'subject_id':cid,'publisher_id':'company:'+cid}
-            pages.append(page)
-        # Persist the fetched page before any paid work, to survive extraction failure.
-        with Session() as db:
-            c=db.get(Company,cid);c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals}};db.commit()
-        result=pipeline.ask('extraction',GUARD+SPECIFIC_ANSWER_RULES+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL страницы. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.',{'company':name,'legal_names':legal_names,'criteria':criteria,'pages':[page],'date':config['research_as_of']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
-        checked=verify_report(result.report,[page],'website',config['social_forum_days'],as_of=config['research_as_of'],company_id=cid)
-        import hashlib
+        batch=[]
+        while queue and len(attempted)+len(batch)<limit and len(batch)<batch_size:
+            url=queue.pop(0)
+            if url in attempted or any(previous_url==url for previous_url,_ in batch):continue
+            checkpoint(pipeline.id,'BASE_RESEARCH')
+            page=next((p for p in pages if p['url']==url),None)
+            if page is None:
+                try:page=fetch_base_page(fetch,url,resource)
+                except (SourceUnavailable, TimeoutError, OSError) as exc:
+                    attempted.append(url);errors.append({'url':url,'reason':str(exc)[:200]})
+                    save_progress()
+                    continue
+                if (urlsplit(page['url']).hostname or '').removeprefix('www.')!=(urlsplit(resource).hostname or '').removeprefix('www.'):
+                    attempted.append(url);errors.append({'url':url,'reason':'Неподтверждённый междоменный редирект'})
+                    save_progress()
+                    continue
+                page={**page,'subject_id':cid,'publisher_id':'company:'+cid}
+                pages.append(page)
+            batch.append((url,page))
+            queue.extend(links(page))
+            # Persist fetched pages before any paid call; an interrupted call can
+            # reuse the snapshot without fetching the website again.
+            save_progress()
+        if not batch:continue
+        selected_pages=[page for _,page in batch]
+        prompt=GUARD+SPECIFIC_ANSWER_RULES+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL именно той страницы, где находится цитата; id доказательств уникальны внутри ответа. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.'
+        result=pipeline.ask('extraction',prompt,{'company':name,'legal_names':legal_names,
+            'criteria':criteria,'pages':selected_pages,'date':config['research_as_of']},
+            BasePageResult,max_output=config['extraction_tokens']*len(batch),company_id=cid)
+        ids=[item.id for item in result.report.evidence]
+        if len(ids)!=len(set(ids)):
+            raise ValueError('Повторяющиеся идентификаторы доказательств в ответе модели')
+        checked=verify_report(result.report,selected_pages,'website',config['social_forum_days'],as_of=config['research_as_of'],company_id=cid)
         mapping={e.id:hashlib.sha256((e.url+'\n'+' '.join(e.quote.split())).encode()).hexdigest()[:24] for e in result.report.evidence}
         rewritten=[remap_answer_evidence(a,mapping) for a in result.answers]
         fresh=validate_answers(rewritten,criteria,checked['evidence'])
         accepted_by_id={a['criterion_id']:a for a in fresh}
         citation_losses.update(a.criterion_id for a in rewritten if a.status=='confirmed' and accepted_by_id[a.criterion_id]['status']=='unknown')
-        answers=merge_base_answers(answers,fresh);citation_losses.difference_update(a['criterion_id'] for a in answers if a['status']=='confirmed');evidence=list({e['id']:e for e in evidence+checked['evidence']}.values());signals=normalized_signals(signals+checked['signals'])
-        attempted.append(url);queue.extend(links(page))
-        state={'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'citation_losses':sorted(citation_losses),'summary':'Базовый сбор по критериям','limitations':checked['limitations'],'contradictions':checked['contradictions']}
-        with Session() as db:
-            c=db.get(Company,cid);c.research={**c.research,'base':state};db.commit()
+        answers=merge_base_answers(answers,fresh)
+        citation_losses.difference_update(a['criterion_id'] for a in answers if a['status']=='confirmed')
+        evidence=list({e['id']:e for e in evidence+checked['evidence']}.values())
+        signals=normalized_signals(signals+checked['signals'])
+        attempted.extend(url for url,_ in batch)
+        state={'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,
+               'evidence':evidence,'signals':signals,'citation_losses':sorted(citation_losses),
+               'summary':'Базовый сбор по критериям','limitations':checked['limitations'],
+               'contradictions':checked['contradictions'],'batch_pages':batch_pages}
+        save_progress()
     answers=answers or validate_answers([],criteria,[])
     with Session() as db:
         c=db.get(Company,cid);c.identity='CONFIRMED';c.stage='PROFILE_READY'
         c.group='NOT_PROCESSED' if pages else 'INSUFFICIENT_DATA'
         c.reason='' if pages else 'Не удалось прочитать предоставленный сайт; критерии остались неизвестными'
         c.profile={'description':name,'signals':normalized_signals(signals+criterion_signals(answers,evidence)),'base_research':{'version':VERSION,'source_hash':contract['source_hash'],'answers':answers},'coverage_complete':False,'research_as_of':config['research_as_of'],'limitations':['Базовый проход; внешние источники не проверялись']+([] if pages else ['Сайт недоступен для базового сбора']),'contradictions':state.get('contradictions',[])}
-        c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'state':'COMPLETE','termination_reason':'criteria_answered' if all(a['status']=='confirmed' for a in answers) else 'page_limit' if len(attempted)>=limit else 'sources_exhausted'}}
+        c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'batch_pages':batch_pages,'state':'COMPLETE','termination_reason':'criteria_answered' if all(a['status']=='confirmed' for a in answers) else 'page_limit' if len(attempted)>=limit else 'sources_exhausted'}}
         db.commit()
 
 from .schemas import Segment, Segments
