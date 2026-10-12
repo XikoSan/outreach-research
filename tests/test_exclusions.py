@@ -57,6 +57,7 @@ def test_mismatch_needs_one_official_tax_id_disagreeing_with_base():
     page = {'url': 'https://alpha.example/contacts', 'text': 'Реквизиты: ИНН 9876543210'}
     c = company(research={'website': {'pages': [page]}})
     assert database_mismatch(c)
+    assert automatic_reason(c, run()) is None  # Different INN alone cannot prove an unrelated company.
     page['text'] = 'Реквизиты: ИНН 1234567890, филиал: ИНН 9876543210'
     assert not database_mismatch(c)
     page['url'] = 'https://other.example/contacts'
@@ -72,6 +73,7 @@ def test_manual_exclusion_has_reason_can_be_restored_and_invalidates_old_files(c
         c = db.query(Company).filter_by(run_id=rid).first()
         c.identity = 'CONFIRMED'; c.stage = 'PROFILE_READY'; c.group = 'UNCLASSIFIED'
         c.profile = {'signals': []}
+        c.context = {**c.context, 'legal_ids': ['1234567890']}
         c.research = {'website': {'state': 'COMPLETE', 'pages': [
             {'url': 'https://alpha.example/contacts', 'text': 'ИНН 9876543210'}]}}
         cid = c.id
@@ -82,6 +84,9 @@ def test_manual_exclusion_has_reason_can_be_restored_and_invalidates_old_files(c
                                 path='/tmp', status='COMPLETED')
         db.add(package); db.commit()
     old_export = client.post(f'/api/runs/{rid}/exports').json()['id']
+    conflict = client.get(f'/api/companies/{cid}').json()['legal_id_conflict']
+    assert conflict['source_url'] == 'https://alpha.example/contacts'
+    assert conflict['base_inn'] == '1234567890' and conflict['site_inn'] == '9876543210'
     response = client.post(f'/api/companies/{cid}/exclusion', json={
         'code': 'DATABASE_MISMATCH', 'note': 'ИНН на странице отличается от базы',
         'source_url': 'https://alpha.example/contacts'})
@@ -107,6 +112,20 @@ def test_manual_exclusion_has_reason_can_be_restored_and_invalidates_old_files(c
     assert client.delete(f'/api/companies/{cid}/exclusion').status_code == 200
     assert client.get(f'/api/runs/{rid}').json()['excluded'] == 0
     assert client.get(f'/api/exports/{fresh["id"]}/download').status_code == 409
+
+
+def test_manual_exclusion_rejects_external_supporting_page(client):
+    rid = new_run(client)
+    with Session() as db:
+        run = db.get(Run, rid); run.status = 'COMPLETED'
+        c = db.query(Company).filter_by(run_id=rid).first()
+        c.identity = 'CONFIRMED'; c.stage = 'PROFILE_READY'; c.group = 'UNCLASSIFIED'
+        c.research = {'forums': {'pages': [{'url': 'https://forum.example/thread', 'text': 'Company moved'}]}}
+        cid = c.id; db.commit()
+    response = client.post(f'/api/companies/{cid}/exclusion', json={
+        'code': 'DATABASE_MISMATCH', 'note': 'Данные не относятся к компании',
+        'source_url': 'https://forum.example/thread'})
+    assert response.status_code == 422
 
 
 def test_unclassified_and_unavailable_are_not_exclusion_reasons():

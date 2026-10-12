@@ -81,7 +81,7 @@ def database_mismatch(company):
             found = set(TAX_ID.findall(page.get('text', '')))
             if len(found) == 1 and found.isdisjoint(declared):
                 return [{'id': 'page:' + (page.get('content_hash') or page.get('url', '')),
-                         'url': page.get('url', ''), 'quote': 'ИНН на официальной странице не совпадает с ИНН в исходной базе'}]
+                         'url': page.get('url', ''), 'quote': f'ИНН на официальной странице: {next(iter(found))}; ИНН в базе: {next(iter(declared))}'}]
     return []
 
 
@@ -90,8 +90,8 @@ def automatic_reason(company, run):
         return None
     if matches := ceased_operations(company):
         return 'CEASED_OPERATIONS', matches
-    if matches := database_mismatch(company):
-        return 'DATABASE_MISMATCH', matches
+    # A different legal entity on the supplied site can still be part of the
+    # same brand. Keep the mismatch available for review; never auto-exclude it.
     if no_current_sources(company, run):
         return 'NO_CURRENT_SOURCES', []
     return None

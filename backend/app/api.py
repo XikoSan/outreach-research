@@ -245,7 +245,7 @@ class ExclusionInput(BaseModel):
 
 @app.post('/api/companies/{cid}/exclusion')
 def exclude_company(cid:str,payload:ExclusionInput):
-    from .exclusions import no_current_sources, set_excluded
+    from .exclusions import no_current_sources, set_excluded, same_origin, ceased_operations
     with Session() as db:
         c=get(db,Company,cid);r=get(db,Run,c.run_id)
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Сначала остановите исследование')
@@ -258,8 +258,10 @@ def exclude_company(cid:str,payload:ExclusionInput):
             if len(payload.note.strip())<12:raise HTTPException(422,'Укажите конкретную причину')
             sources=[{'id':'page:'+(page.get('content_hash') or page['url']),'url':page['url']}
                      for report in c.research.values() for page in report.get('pages',[])
-                     if page.get('url')==payload.source_url]
-            if not sources:raise HTTPException(422,'Выберите сохранённую страницу компании')
+                     if page.get('url')==payload.source_url and same_origin(page.get('url',''),c.resource)]
+            if not sources:raise HTTPException(422,'Нужно выбрать сохранённую страницу официального сайта компании')
+            if payload.code=='CEASED_OPERATIONS' and not any(item.get('url')==payload.source_url for item in ceased_operations(c)):
+                raise HTTPException(422,'Прекращение деятельности не подтверждено проверенной цитатой с сайта компании')
         set_excluded(c,payload.code,sources,source='reviewed',note=payload.note)
         log(db,r.id,'EXCLUSION','Компания исключена из выборки',c.id,{'code':payload.code})
         db.commit()
