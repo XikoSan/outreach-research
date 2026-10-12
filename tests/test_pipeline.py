@@ -27,7 +27,7 @@ class FakeGateway:
         self.roles.append(role)
         if schema is Discovery:
             d=payload['direction'];host=payload['resource']
-            sources=[{'url':host,'direction':'website','rationale':'Official'}] if d=='website' else ([{'url':'https://industry.example/news/'+payload['company'],'direction':'news_jobs','rationale':'Independent announcement'}] if d=='news_jobs' else [])
+            sources=[{'url':host,'direction':'website','rationale':'Official'}] if d=='website' else ([{'url':'https://industry.example/jobs/'+payload['company'],'direction':'jobs','rationale':'Published vacancy'}] if d=='jobs' else [])
             return Discovery(identity_confirmed=True,identity_reason='Exact company identity',products='Products',sources=sources)
         if schema is ResearchReport:
             page=payload['pages'][0];name='multiple_product_lines' if payload['direction']=='website' else 'new_market_entry'
@@ -71,7 +71,7 @@ def test_page_checkpoint_survives_extraction_failure(client,monkeypatch):
     with pytest.raises(ValueError):Pipeline(rid,g).research(cid)
     assert fetcher.call_count==1
     g.ask=original;Pipeline(rid,g).research(cid)
-    # Website is reused; only independent news page is fetched on resume.
+    # Website is reused; only the vacancy page is fetched on resume.
     assert fetcher.call_count==2
 
 def gateway(rid,mode='ok'):

@@ -13,7 +13,15 @@ def social(url):
 def prepare(pipeline,cid,config,sender,fetch):
     with Session() as db:
         c=db.get(Company,cid)
-        if c.context.get('acquisition_plan'):return c.context['acquisition_plan']
+        if c.context.get('acquisition_plan'):
+            plan=c.context['acquisition_plan']
+            discovery=plan.get('discovery',{})
+            return {**plan,
+                    'sources':{d:plan.get('sources',{}).get(d,[]) for d in RESEARCH_DIRECTIONS},
+                    'checked_directions':[d for d in plan.get('checked_directions',[]) if d in RESEARCH_DIRECTIONS],
+                    'discovery':{**discovery,
+                                 'checked_directions':[d for d in discovery.get('checked_directions',[]) if d in RESEARCH_DIRECTIONS],
+                                 'sources':[s for s in discovery.get('sources',[]) if s.get('direction') in RESEARCH_DIRECTIONS]}}
         name,resource,context=c.name,c.resource,dict(c.context)
     anchor_social=social(resource) or resource in context.get('socials',[])
     allowed=selected_directions(config)
@@ -44,7 +52,7 @@ def prepare(pipeline,cid,config,sender,fetch):
     trusted_website=bool(resource and not resource.startswith('unresolved:') and not (social(resource) or declared_social))
     exact_evidence=bool(initial and found.identity_confirmed and len(quote)>=15 and quote in initial['text'] and any(n in quote.casefold() for n in names))
     confirmed=bool(not context.get('identity_conflict') and (trusted_website or exact_evidence))
-    sources={d:[] for d in ('website','social','news_jobs','reviews','forums')}
+    sources={d:[] for d in RESEARCH_DIRECTIONS}
     official_socials=[]
     if initial:
         if social(resource) or declared_social:sources['social'].append(initial['url']);official_socials.append(initial['url'])

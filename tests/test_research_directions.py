@@ -2,6 +2,8 @@
 import json
 from app.db import Session, Run, Company
 from app.pipeline import Pipeline
+from app.schemas import RESEARCH_DIRECTIONS, RunConfig, selected_directions
+from app.acquisition import prepare
 from app.schemas import CandidateSource, Discovery
 from test_architecture_v3 import v3_run
 from test_workflow import workbook
@@ -39,7 +41,7 @@ def test_website_only_avoids_discovery_and_has_complete_selected_coverage(client
 def test_forum_disabled_is_not_fetched_even_if_discovery_returns_it(client,monkeypatch):
     rid=v3_run(client)
     with Session() as db:
-        run=db.get(Run,rid);run.config={**run.config,'research_directions':['website','social','news_jobs','reviews']};db.commit()
+        run=db.get(Run,rid);run.config={**run.config,'research_directions':['website','social','jobs','reviews']};db.commit()
         cid=db.query(Company).filter_by(run_id=rid).first().id
     fetched=[];requested=[]
     def fetch(url):fetched.append(url);return v3_fetch(url)
@@ -80,3 +82,34 @@ def test_official_social_identity_anchor_survives_social_switch_off(client,monke
         assert company.identity=='CONFIRMED'
         assert 'social' in company.research
         assert 'forums' not in company.research
+
+
+def test_vacancies_are_distinct_and_old_combined_direction_is_ignored(client):
+    assert RESEARCH_DIRECTIONS == ('website','social','jobs','reviews','forums')
+    assert 'jobs' in RunConfig().research_directions
+    assert selected_directions({'research_directions':['website','news_jobs']}) == {'website'}
+    context=client.post('/api/contexts',json={'name':'Услуги','summary':'Исследование продукта и аудитории компании'}).json()
+    file=('source.xlsx',workbook([['Alpha','https://alpha.example','a','1']]))
+    result=client.post('/api/runs',data={'context_id':context['id'],'config_json':json.dumps({'research_directions':['website','news_jobs']})},files={'file':file})
+    assert result.status_code==422
+
+def test_saved_combined_source_plan_cannot_reintroduce_news(client):
+    rid=v3_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'research_directions':['website','jobs']}
+        company=db.query(Company).filter_by(run_id=rid).first()
+        company.context={**company.context,'acquisition_plan':{
+            'identity_confirmed':True,
+            'sources':{'website':['https://alpha.example'],'news_jobs':['https://example.org/article']},
+            'checked_directions':['website','news_jobs'],
+            'discovery':{'identity_confirmed':True,'identity_reason':'saved','products':'',
+                         'sources':[{'url':'https://example.org/article','direction':'news_jobs','rationale':'old'}],
+                         'checked_directions':['website','news_jobs']}}}
+        cid=company.id
+        db.commit()
+    plan=prepare(None,cid,{},None,None)
+    assert plan['sources']['jobs']==[]
+    assert 'news_jobs' not in plan['sources']
+    assert plan['discovery']['sources']==[]
+    assert plan['checked_directions']==['website']

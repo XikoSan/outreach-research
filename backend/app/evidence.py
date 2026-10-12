@@ -58,7 +58,7 @@ def verify_report(report,pages,direction,days,*,as_of,company_id):
         age=(reference-date.fromisoformat(published)).days if published else None
         current=True
         if direction in ('social','forums'):current=age is not None and age<=days
-        elif direction=='news_jobs':current=age is not None and age<=365
+        elif direction=='jobs':current=age is not None and age<=90
         elif direction=='reviews':current=age is not None and age<=365
         # All external company/product assertions need an explicit subject span.
         subject=data.get('subject_quote','').strip()

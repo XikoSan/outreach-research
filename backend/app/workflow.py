@@ -17,7 +17,7 @@ from sqlalchemy import func
 from . import credentials
 from .config import settings
 from .db import Session, Run, Company, SourceRow, Sender, ResearchContext, PromptPackage, ModelCall, uid, now, log
-from .schemas import SenderProfile, PromptResult, Review
+from .schemas import selected_directions, SenderProfile, PromptResult, Review
 from .llm import Gateway, RunPaused
 from .prompts import PROMPT, REVIEW
 from .workbooks import fingerprint
@@ -101,7 +101,7 @@ def reports(rid:str,company_id:str=''):
             c=get(db,Company,company_id)
             if c.run_id!=rid:raise HTTPException(404,'Компания не относится к исследованию')
             result['company']=company_view(c,r,True)
-            result['directions']={direction:{k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations','coverage','termination_reason','validation_version','external_checked')} for direction,report in c.research.items()}
+            result['directions']={direction:{k:v for k,v in report.items() if k in ('discovery','sources','errors','state','summary','evidence','signals','contradictions','limitations','coverage','termination_reason','validation_version','external_checked')} for direction,report in c.research.items() if direction in selected_directions(r.config)}
         return result
 
 @router.get('/runs/{rid}/segments')

@@ -5,7 +5,7 @@ from openai import AuthenticationError, PermissionDeniedError, NotFoundError
 from urllib.parse import urlsplit
 from .db import Session, Run, Company, log
 from .llm import Gateway, BudgetPause, RunPaused, UncertainCall, SearchLimit
-from .schemas import Discovery, ResearchReport, Profile, Segments, Review, PromptResult, selected_directions
+from .schemas import Discovery, ResearchReport, Profile, Segments, Review, PromptResult, RESEARCH_DIRECTIONS, selected_directions
 from .crawler import fetch
 from .rules import classify, origin, classify_with_trace
 from . import evidence as evidence_v3
@@ -15,8 +15,8 @@ from .prompts import GUARD, DISCOVERY, EXTRACT, SYNTHESIS, SEGMENT, REVIEW, PROM
 from .workbooks import export_run
 from .config import settings
 
-DIRECTIONS=['website','social','news_jobs','reviews','forums']
-LIMIT_KEYS={'website':'max_website_pages','social':'max_social_sources','news_jobs':'max_external_sources','reviews':'max_review_sources','forums':'max_review_sources'}
+DIRECTIONS=RESEARCH_DIRECTIONS
+LIMIT_KEYS={'website':'max_website_pages','social':'max_social_sources','jobs':'max_external_sources','reviews':'max_review_sources','forums':'max_review_sources'}
 
 def sender_directions(sender):
     # Legacy run snapshots retain their original scope. New profiles need no offer catalogue.
@@ -180,8 +180,8 @@ class Pipeline:
                 log(db,self.id,direction,'Направление завершено',company_id,{'pages':len(pages),'evidence':len(result['evidence']),'state':result['state']});db.commit()
         with Session() as db:
             c=db.get(Company,company_id)
-            reports={k:{a:b for a,b in v.items() if a in ('summary','evidence','signals','contradictions','limitations')} for k,v in c.research.items()}
-            all_evidence=evidence_for(c)
+            reports={k:{a:b for a,b in v.items() if a in ('summary','evidence','signals','contradictions','limitations')} for k,v in c.research.items() if k in allowed}
+            all_evidence=[e for report in reports.values() for e in report.get('evidence',[])]
         if all_evidence:
             # Quotes are already validated; synthesis needs compact evidence identities.
             compact={k:{**v,'evidence':[{key:e.get(key) for key in ('id','url','scope','quote','published_at','origin')} for e in v['evidence']]} for k,v in reports.items()}

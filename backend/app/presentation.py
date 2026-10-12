@@ -2,6 +2,7 @@
 from collections import Counter
 from sqlalchemy import func
 from .db import Company
+from .schemas import selected_directions
 from .rules import classify, classify_with_trace
 
 ATTENTION=('FAILED','NEEDS_REVIEW','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED')
@@ -15,20 +16,27 @@ def counts(db,rid):
         if stage=='PROFILE_READY' or group in ATTENTION:finished+=n
     return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION)}
 
-def evidence(company):
-    return list({e['id']:{**e,'direction':direction} for direction,report in company.research.items() for e in report.get('evidence',[])}.values())
+def visible_reports(company,run):
+    allowed=selected_directions(run.config)
+    return {direction:report for direction,report in company.research.items()
+            if direction in allowed or direction.startswith(('base','targeted_'))}
+
+def evidence(reports):
+    return list({e['id']:{**e,'direction':direction} for direction,report in reports.items() for e in report.get('evidence',[])}.values())
 
 def company_view(company,run,detail=False):
     segments={s['id']:s for s in run.segments}
     segment=segments.get(company.group)
-    signals=company.profile.get('signals',[])
+    reports=visible_reports(company,run)
+    ev=evidence(reports)
+    known={e['id'] for e in ev}
+    signals=[s for s in company.profile.get('signals',[]) if set(s.get('evidence_ids',[]))<=known]
     names=set((segment or {}).get('required_signals',[])+(segment or {}).get('supporting_signals',[]))
     important=[s for s in signals if s.get('state')=='confirmed' and s.get('confidence') in ('HIGH','MEDIUM') and (not segment or s['name'] in names)]
-    ev=evidence(company)
     group,reason=(classify_with_trace(company.profile,ev,run.segments)[:2] if run.config.get('pipeline_version',1)>=3 else classify(company.profile,ev,run.segments)) if company.stage=='PROFILE_READY' and company.identity=='CONFIRMED' else (company.group,company.reason)
     result={k:getattr(company,k) for k in ('id','name','resource','identity','stage','group','reason')}
     result.update(segment=segment,signals=important[:3],evidence_count=len(ev),evidence_state='Достаточно для сегмента' if segment and group==company.group else ('Есть ограничения' if company.group in ATTENTION else 'Исследование не завершено'),evidence_reason=reason,latest_publication=max((e.get('published_at','') or '' for e in ev),default=''))
     if detail:
-        result.update(profile=company.profile,signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in company.research.items()})
+        result.update(profile={**company.profile,'signals':signals},signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in reports.items()})
     if not detail and segment:result['segment']={k:segment[k] for k in ('id','name','hypothesis')}
     return result

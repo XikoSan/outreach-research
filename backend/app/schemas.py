@@ -1,11 +1,11 @@
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-RESEARCH_DIRECTIONS = ('website', 'social', 'news_jobs', 'reviews', 'forums')
+RESEARCH_DIRECTIONS = ('website', 'social', 'jobs', 'reviews', 'forums')
 
 def selected_directions(config: dict) -> set[str]:
     """Old saved runs retain their original scope when the setting is absent."""
-    return set(config.get('research_directions', RESEARCH_DIRECTIONS)) | {'website'}
+    return (set(config.get('research_directions', RESEARCH_DIRECTIONS)) & set(RESEARCH_DIRECTIONS)) | {'website'}
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -34,7 +34,7 @@ class SenderProfile(Strict):
     offers: list[Offer] = Field(default_factory=list)
 class RunConfig(Strict):
     methodology_version: Literal['legacy','campaign-v1'] = 'legacy'
-    research_directions: list[Literal['website','social','news_jobs','reviews','forums']] = Field(default_factory=lambda: list(RESEARCH_DIRECTIONS))
+    research_directions: list[Literal['website','social','jobs','reviews','forums']] = Field(default_factory=lambda: list(RESEARCH_DIRECTIONS))
     @field_validator('research_directions')
     @classmethod
     def check_research_directions(cls, value):
@@ -56,11 +56,11 @@ class RunConfig(Strict):
     models: dict[str,str] = Field(default_factory=dict)
 class CandidateSource(Strict):
     url: str
-    direction: Literal['website','social','news_jobs','reviews','forums']
+    direction: Literal['website','social','jobs','reviews','forums']
     rationale: str
 class Discovery(Strict):
     identity_quote: str = ""
-    checked_directions: list[Literal["website","social","news_jobs","reviews","forums"]] = Field(default_factory=list)
+    checked_directions: list[Literal["website","social","jobs","reviews","forums"]] = Field(default_factory=list)
     identity_confirmed: bool
     identity_reason: str
     products: str

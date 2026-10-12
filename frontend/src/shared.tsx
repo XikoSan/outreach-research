@@ -2,7 +2,7 @@ import {ArrowUpRight} from 'lucide-react';
 import React,{useEffect,useState,useCallback} from 'react';
 export type Obj=Record<string,any>;
 export const labels:Obj={READY_FOR_GENERATION:'Готово для генерации',PROMPT_RUNNING:'Подготовка промпта',CREATED:'Готово к запуску',QUEUED:'В очереди',RUNNING:'Исследуется',PAUSING:'Останавливается',PAUSED:'Приостановлено',COMPLETED:'Завершено',COMPLETED_WITH_ISSUES:'С ограничениями',FAILED:'Ошибка',NOT_PROCESSED:'Ожидает обработки',NEEDS_REVIEW:'Нужна проверка',INSUFFICIENT_DATA:'Недостаточно данных',AMBIGUOUS:'Неоднозначно',UNCLASSIFIED:'Без сегмента',IMPORTED:'База импортирована',RESEARCH:'Исследование источников',COLLECTING:'Сбор материалов',DISCOVERY:'Поиск источников',EXTRACTION:'Извлечение фактов',SYNTHESIS:'Сопоставление фактов',SEGMENTATION:'Формирование сегментов',CLASSIFICATION:'Распределение компаний',PROMPT:'Подготовка промптов',EXPORT:'Подготовка файлов',EXPORTED:'Исследование завершено',PROFILE_READY:'Профиль собран',PENDING:'Ожидает обработки',IDENTITY:'Проверка компании',RESEARCHING:'Сбор фактов',CONFIRMED:'Подтверждена',UNVERIFIED:'Не проверена'};
-export const directions:Obj={website:'Сайт',social:'Социальные сети',news_jobs:'Новости и вакансии',reviews:'Отзывы',forums:'Форумы'};
+export const directions:Obj={website:'Сайт',social:'Социальные сети',jobs:'Вакансии',reviews:'Отзывы',forums:'Форумы'};
 export const attention=['FAILED','NEEDS_REVIEW','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED'];
 export const active=(status:string)=>['RUNNING','QUEUED','PAUSING'].includes(status);
 export const title=(value:string)=>labels[value]||value;
