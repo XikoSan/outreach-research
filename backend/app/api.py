@@ -42,7 +42,9 @@ def get(db,model,id):
     return item
 
 def run_view(r):
-    return {k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segments','segmentation_version','created_at','config','sender_snapshot','context_snapshot')}
+    result={k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segmentation_version','created_at','config','sender_snapshot','context_snapshot')}
+    result['segments']=[{'id':segment['id'],'name':segment['name']} for segment in r.segments]
+    return result
 
 def sender_view(s):
     return {'id':s.id,'version':s.version,'profile':s.profile}

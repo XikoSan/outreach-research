@@ -21,7 +21,7 @@ from .schemas import selected_directions, SenderProfile, PromptResult, Review
 from .llm import Gateway, RunPaused
 from .prompts import PROMPT, REVIEW
 from .workbooks import fingerprint
-from .presentation import company_view
+from .presentation import company_view, public_segment
 
 router=APIRouter(prefix='/api')
 ACTIVE=('RUNNING','QUEUED','PAUSING')
@@ -122,7 +122,7 @@ def segment_summaries(rid:str):
             rows=db.query(SourceRow).join(Company,SourceRow.company_id==Company.id).filter(Company.run_id==rid,Company.group==segment['id']).count()
             strong=sum(sum(s.get('confidence')=='HIGH' and s.get('state')=='confirmed' for s in c.profile.get('signals',[])) for c in companies)
             conflicts=sum(bool(c.profile.get('contradictions')) for c in companies)
-            result.append({**segment,'company_count':len(companies),'contact_count':rows,'strong_signals':strong,'conflicts':conflicts,'recommended':False})
+            result.append({**public_segment(segment),'company_count':len(companies),'contact_count':rows,'strong_signals':strong,'conflicts':conflicts,'recommended':False})
         eligible=[s for s in result if s['company_count'] and s['contact_count'] and not s['conflicts']]
         if eligible:
             best=max(eligible,key=lambda s:(s['strong_signals']/s['company_count'],s.get('confidence')=='HIGH',s['contact_count']))
@@ -237,7 +237,7 @@ def create_package(rid:str,payload:PackageInput):
         try:
             freeze_contacts(r,rows,folder/'contacts.xlsx')
             selection={'row_ids':[row.id for row in rows],'company_ids':sorted({row.company_id for row in rows}),'source_hash':r.source_hash,'segmentation_version':r.segmentation_version,'contacts_sha256':hashlib.sha256((folder/'contacts.xlsx').read_bytes()).hexdigest(),'request_hash':request_hash}
-            p=PromptPackage(id=pid,run_id=rid,name=payload.name.strip(),segment_snapshot={k:v for k,v in segment.items() if k!='prompt'},sender_snapshot=snapshot,context_snapshot=r.context_snapshot or {'summary':r.sender_snapshot.get('profile',{}).get('description','')},selection=selection,recipient_type=payload.recipient_type,next_step=payload.next_step.strip(),budget=0,path=str(folder))
+            p=PromptPackage(id=pid,run_id=rid,name=payload.name.strip(),segment_snapshot={k:v for k,v in public_segment(segment).items() if k not in ('prompt','signal_labels')},sender_snapshot=snapshot,context_snapshot=r.context_snapshot or {'summary':r.sender_snapshot.get('profile',{}).get('description','')},selection=selection,recipient_type=payload.recipient_type,next_step=payload.next_step.strip(),budget=0,path=str(folder))
             db.add(p);db.commit();return package_view(p)
         except ValueError as e:
             db.rollback();shutil.rmtree(folder,ignore_errors=True);raise HTTPException(409,str(e))

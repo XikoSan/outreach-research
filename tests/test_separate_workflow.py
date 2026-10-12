@@ -68,6 +68,24 @@ def test_stage_reports_include_discovery_evidence_and_review(client,monkeypatch)
     assert segments[0]['recommended'] and segments[0]['contact_count']==3
 
 
+def test_bundle_excludes_per_company_bindings_from_prompt_snapshot(client,monkeypatch):
+    r,_=research(client,monkeypatch)
+    with Session() as db:
+        run=db.get(Run,r['id'])
+        segment={**run.segments[0],'member_bindings':{'member-a':{'channel':{'raw_signal_names':['a']}}},
+                 'signal_labels':{'a':'internal company criterion'},
+                 'shared_message':'Общее предложение исследования'}
+        run.segments=[segment]
+        db.commit()
+    response=package(client,r['id'])
+    assert response.status_code==200,response.text
+    with Session() as db:
+        snapshot=db.get(PromptPackage,response.json()['id']).segment_snapshot
+        assert 'member_bindings' not in snapshot
+        assert 'signal_labels' not in snapshot
+        assert snapshot['shared_message']=='Общее предложение исследования'
+
+
 def test_bundle_freezes_selection_sender_and_hypothesis(client,monkeypatch):
     r,_=research(client,monkeypatch)
     contacts=client.get(f"/api/runs/{r['id']}/contacts?segment_id=segment_001").json()

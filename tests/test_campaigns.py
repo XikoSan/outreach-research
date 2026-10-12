@@ -681,6 +681,21 @@ def test_campaign_rule_candidate_checks_each_company_raw_evidence(client,monkeyp
         assert len(run.segments)==1
         assert len(run.segments[0]['member_bindings'])==2
         assert {company.group for company in db.query(Company).filter_by(run_id=rid)}=={'segment_001'}
+        from app.presentation import company_view
+        for company in db.query(Company).filter_by(run_id=rid):
+            summary=company_view(company,run)
+            detail=company_view(company,run,detail=True)
+            assert summary['evidence_state']=='Достаточно для сегмента'
+            assert detail['evidence_state']=='Достаточно для сегмента'
+            assert {signal['name'].split('__')[0] for signal in summary['signals']} >= {
+                'criterion_buyer_types','criterion_products'}
+            assert 'member_bindings' not in summary['segment']
+            assert set(detail['segment']['member_bindings'])=={company.id}
+            assert set(detail['segment']['signal_labels']) >= {
+                name for facet in ('channel','product')
+                for name in detail['segment']['member_bindings'][company.id][facet]['raw_signal_names']}
+        assert 'member_bindings' not in client.get(f'/api/runs/{rid}').json()['segments'][0]
+        assert 'member_bindings' not in client.get(f'/api/runs/{rid}/segments').json()[0]
         from app.campaigns import classify_campaign
         from app.pipeline import evidence_for
         company=db.query(Company).filter_by(run_id=rid).first()
