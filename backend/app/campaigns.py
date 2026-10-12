@@ -1,12 +1,15 @@
 """Versioned offer-derived research contracts, independent of individual recipients."""
 import hashlib
+import re
+import unicodedata
 from typing import Literal
 from pydantic import Field
 from .schemas import Strict, ResearchReport, EvidenceItem
 from .db import Session, Run
 from .prompts import GUARD
 
-VERSION = 'campaign-v1'
+VERSION = 'campaign-v2'
+LEGACY_VERSION = 'campaign-v1'
 
 class OfferFact(Strict):
     kind: Literal['service','applicability','outcome','restriction']
@@ -27,20 +30,37 @@ class ResearchCriterion(Strict):
     decision_impact: str = Field(min_length=1)
     stop_condition: str = Field(min_length=1)
     offer_ids: list[str] = Field(min_length=1)
+    specific_values: bool = False
 
 class CampaignResearchPlan(Strict):
     offers: list[CampaignOffer] = Field(min_length=1,max_length=15)
     criteria: list[ResearchCriterion] = Field(max_length=12)
 
+class OfferQuoteCorrection(Strict):
+    offer_index: int
+    fact_index: int
+    source_quote: str
+
+class OfferQuoteCorrections(Strict):
+    corrections: list[OfferQuoteCorrection]
+
 # The common pass records observations, never an inferred commercial need.
-BASE_CRITERIA = [
+LEGACY_BASE_CRITERIA = [
     {'id':'products','question':'Какие основные продукты или услуги предлагает компания?','decision_impact':'Соответствие направлению сотрудничества'},
     {'id':'audiences','question':'Какие типы покупателей и задачи применения названы прямо?','decision_impact':'Общая ситуация компаний сегмента'},
     {'id':'sales_model','question':'Какая модель продажи подтверждена: прямая, партнёрская, проектная, подписка?','decision_impact':'Выбор общего предложения и аргументации'},
     {'id':'presentation','question':'Как разделены продукты и аудитории в публичном предложении?','decision_impact':'Основания и опровержения гипотезы о позиционировании'},
 ]
-for item in BASE_CRITERIA:
+for item in LEGACY_BASE_CRITERIA:
     item.update(answer_options=['подтверждено','не установлено'],source_types=['официальный сайт','официальная корпоративная страница'],evidence_requirement='Точная цитата и URL; не делать вывод об отсутствии по отсутствию упоминания',stop_condition='Получено прямое подтверждение либо исчерпаны доступные релевантные страницы базового прохода')
+BASE_CRITERIA = [
+    {'id':'products','question':'Какие конкретные продукты или услуги названы? Укажи отдельные значения, а не факт наличия каталога.','decision_impact':'Сопоставление предмета предложения'},
+    {'id':'buyer_types','question':'Какие конкретные типы покупателей или заказчиков названы? Не смешивай их со сценариями использования.','decision_impact':'Различение целевой аудитории'},
+    {'id':'application_scenarios','question':'Какие конкретные задачи применения продукта названы? Не подменяй их типом покупателя.','decision_impact':'Различение сценария применения'},
+    {'id':'product_buyer_use_link','question':'Какая связь конкретного продукта, типа покупателя и сценария применения названа прямо? Значение: продукт | покупатель | сценарий. Если связь не указана, ответ unknown.','decision_impact':'Основание общей кампании по одному сочетанию продукта, покупателя и применения'},
+]
+for item in BASE_CRITERIA:
+    item.update(answer_options=['конкретные значения','не установлено'],source_types=['официальный сайт','официальная корпоративная страница'],evidence_requirement='Для каждого конкретного значения отдельный facts.value, дословно присутствующий в цитате; facts.evidence_ids с URL. Общее «подтверждено» недостаточно. Не выводить отсутствие из молчания.',stop_condition='Получены конкретные подтверждённые значения либо исчерпаны доступные релевантные страницы базового прохода',specific_values=True)
 
 PLAN_PROMPT = GUARD + '''
 Подготовь общий для всей базы план исследования на основе документа с предложением отправителя.
@@ -48,6 +68,7 @@ PLAN_PROMPT = GUARD + '''
 Выдели услуги и отдельно условия применимости, результаты и ограничения. Каждый факт должен иметь дословный source_quote из source_text; не усиливай обещания исходного документа.
 Дополнительные criteria нужны только если ответ меняет выбор предложения или принадлежность к сегменту. Не повторяй четыре base_criteria. Для каждого вопроса укажи варианты ответа с «не установлено», доступные публичные источники, достаточное подтверждение, влияние на решение, условие остановки и offer_ids.
 Не требуй интервью, контакта с компанией, внутренней выручки/конверсии и доказательства потребности в услуге. Не собирай личные данные сотрудников. Не вводи денежные лимиты.
+Не дублируй buyer_types, application_scenarios и product_buyer_use_link под другим названием. Критерии должны иметь конкретные различающие значения, а не общий ответ «да».
 '''
 
 def source_span(quote, source):
@@ -70,7 +91,7 @@ def source_span(quote, source):
     if start<0:return None
     return source[positions[start]:positions[start+len(needle)-1]+1]
 
-def validate_plan(plan, source):
+def validate_plan(plan, source, base_criteria=None):
     offer_ids=[o.id for o in plan.offers]
     if len(offer_ids)!=len(set(offer_ids)):
         raise ValueError('Повторяющиеся идентификаторы предложений')
@@ -83,7 +104,7 @@ def validate_plan(plan, source):
                 raise ValueError('Факт предложения не подтверждён точной цитатой')
             fact.source_quote=literal
     ids=[c.id for c in plan.criteria]
-    if len(ids)!=len(set(ids)) or set(ids)&{c['id'] for c in BASE_CRITERIA}:
+    if len(ids)!=len(set(ids)) or set(ids)&{c['id'] for c in (base_criteria if base_criteria is not None else BASE_CRITERIA)}:
         raise ValueError('Критерии дублируют идентификаторы')
     for criterion in plan.criteria:
         if not set(criterion.offer_ids)<=set(offer_ids):
@@ -100,13 +121,28 @@ def prepare_campaign_plan(pipeline):
         if not source.strip():raise ValueError('Для плана требуется документ с предложением')
         digest=hashlib.sha256(source.encode()).hexdigest()
         cached=run.reports.get('campaign_plan',{})
-        if cached.get('source_hash')==digest and cached.get('version')==VERSION:
-            return validate_plan(CampaignResearchPlan.model_validate(cached['plan']),source)
+        if cached.get('source_hash')==digest and cached.get('version') in (VERSION, LEGACY_VERSION):
+            frozen_base=cached.get('base_criteria') or (LEGACY_BASE_CRITERIA if cached['version']==LEGACY_VERSION else BASE_CRITERIA)
+            return validate_plan(CampaignResearchPlan.model_validate(cached['plan']),source,frozen_base)
     # Existing context preparation bounds documents; exact quotes are checked against the original.
     with Session() as db:
         run=db.get(Run,pipeline.id)
         prepared=run.context_snapshot.get('prepared_text') or source
     plan=pipeline.ask('synthesis',PLAN_PROMPT,{'source_text':prepared,'base_criteria':BASE_CRITERIA},CampaignResearchPlan,max_output=6000)
+    for criterion in plan.criteria:criterion.specific_values=True
+    invalid=[(oi,fi,f) for oi,offer in enumerate(plan.offers) for fi,f in enumerate(offer.facts)
+             if source_span(f.source_quote,source) is None]
+    if invalid:
+        # One cacheable repair from the original document; no search and no new offer facts.
+        corrections=pipeline.ask('synthesis',GUARD+'''Исправь ТОЛЬКО неподтверждённые цитаты фактов предложения. Для каждой пары offer_index/fact_index верни один непрерывный дословный source_quote из source_text, который прямо подтверждает тот же fact.text. Если прямой цитаты нет, верни пустую строку. Не добавляй услуги, обещания и факты.''',
+            {'source_text':source,'invalid_facts':[{'offer_index':oi,'fact_index':fi,
+                'kind':fact.kind,'text':fact.text,'rejected_quote':fact.source_quote}
+                for oi,fi,fact in invalid]},OfferQuoteCorrections,max_output=2200)
+        valid_indices={(oi,fi) for oi,fi,_ in invalid}
+        for item in corrections.corrections:
+            key=(item.offer_index,item.fact_index)
+            if key in valid_indices and (literal:=source_span(item.source_quote,source)):
+                plan.offers[item.offer_index].facts[item.fact_index].source_quote=literal
     validate_plan(plan,source)
     with Session() as db:
         run=db.get(Run,pipeline.id);old=run.reports.get('campaign_plan')
@@ -116,28 +152,71 @@ def prepare_campaign_plan(pipeline):
         db.commit()
     return plan
 
+class CriterionFact(Strict):
+    value: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
 class CriterionAnswer(Strict):
     criterion_id: str
     status: Literal['confirmed','unknown']
     answer: str
     evidence_ids: list[str]
+    facts: list[CriterionFact] = Field(default_factory=list)
+
+
+def normalized_value(value):
+    text=unicodedata.normalize('NFKC',value).casefold().replace('ё','е')
+    return ' '.join(re.findall(r'[^\W_]+',text,flags=re.UNICODE))
+
+
+def valid_fact(fact, answer_ids, known, *, relation):
+    ids=list(dict.fromkeys(fact.evidence_ids))
+    if not ids or not set(ids)<=set(answer_ids)&set(known):return False
+    parts=[part.strip() for part in fact.value.split('|')]
+    if relation and len(parts)!=3:return False
+    if not relation and len(parts)!=1:return False
+    generic={'да','есть','подтверждено','продукты','услуги','покупатели','клиенты',
+             'сценарии','observed','confirmed','yes','products','services','buyers',
+             'customers','use cases'}
+    terms=[normalized_value(part) for part in parts]
+    if any(not part or part in generic for part in terms):return False
+    # A relationship cannot be inferred by joining unrelated sentences in a quote.
+    for eid in ids:
+        spans=(re.split(r'[.!?;\n]+',known[eid]['quote']) if relation else [known[eid]['quote']])
+        if any(all(part in normalized_value(span) for part in terms) for span in spans):
+            return True
+    return False
 
 
 def validate_answers(answers, criteria, evidence):
-    """Only bound, current, quoted company facts can fill a base criterion."""
-    allowed={c['id'] for c in criteria}
+    """Bind each specific value to current literal company evidence, preserving old plans."""
+    by_id={c['id']:c for c in criteria}
     known={e['id']:e for e in evidence if e.get('subject_verified') and e.get('current') and e.get('scope') in ('company','product') and e.get('quote')}
     result=[];seen=set()
     for answer in answers:
-        if answer.criterion_id not in allowed or answer.criterion_id in seen:
+        if answer.criterion_id not in by_id or answer.criterion_id in seen:
             raise ValueError('Неизвестный или повторяющийся критерий')
         seen.add(answer.criterion_id)
+        criterion=by_id[answer.criterion_id]
+        specific=bool(criterion.get('specific_values'))
         data=answer.model_dump()
-        if answer.status=='unknown' or not answer.evidence_ids or not set(answer.evidence_ids)<=set(known):
-            data.update(status='unknown',answer='Не установлено',evidence_ids=[])
+        if specific:
+            verified=[];dedup=set()
+            for fact in answer.facts:
+                key=normalized_value(fact.value)
+                if key in dedup:continue
+                if valid_fact(fact,answer.evidence_ids,known,relation=answer.criterion_id=='product_buyer_use_link'):
+                    verified.append(fact.model_dump());dedup.add(key)
+            data['value_specific']=True
+            data['facts']=verified
+            data['evidence_ids']=list(dict.fromkeys(i for fact in verified for i in fact['evidence_ids']))
+        if answer.status=='unknown' or not data['evidence_ids'] or not set(data['evidence_ids'])<=set(known):
+            data.update(status='unknown',answer='Не установлено',evidence_ids=[],facts=[])
         result.append(data)
-    for cid in sorted(allowed-seen):
-        result.append({'criterion_id':cid,'status':'unknown','answer':'Не установлено','evidence_ids':[]})
+    for cid in sorted(set(by_id)-seen):
+        missing={'criterion_id':cid,'status':'unknown','answer':'Не установлено','evidence_ids':[],'facts':[]}
+        if by_id[cid].get('specific_values'):missing['value_specific']=True
+        result.append(missing)
     return result
 
 BASIS_POLICIES = {
@@ -145,6 +224,15 @@ BASIS_POLICIES = {
     'hypothesis': {'independent_sources_required':True,'min_confirmed_signals':2,'allowed_claim':'Осторожная гипотеза о потенциальной проблеме или возможности'},
     'event': {'independent_sources_required':True,'min_confirmed_signals':2,'dated_event_required':True,'allowed_claim':'Актуальное событие усиливает общую гипотезу, но не заменяет её'},
 }
+
+def remap_answer_evidence(answer, mapping):
+    """Translate temporary model evidence IDs in both the answer and its facets."""
+    return answer.model_copy(update={
+        'evidence_ids':[mapping.get(eid,eid) for eid in answer.evidence_ids],
+        'facts':[fact.model_copy(update={'evidence_ids':[mapping.get(eid,eid) for eid in fact.evidence_ids]})
+                 for fact in answer.facts],
+    })
+
 
 class BaseAnswers(Strict):
     answers: list[CriterionAnswer]
@@ -175,11 +263,11 @@ def repair_citation_losses(pipeline, company_id, wanted):
         selected_pages=[{**page,'text':page['text'][:32000]} for page in pages[:3] if page.get('subject_id')==company_id and page.get('publisher_id')=='company:'+company_id]
         if not selected_pages:return False
         name=company.name;as_of=run.config['research_as_of'];days=run.config['social_forum_days']
-    prompt=GUARD+'''Восстанови ТОЛЬКО указанные потерянные ответы по сохранённым страницам. Каждый evidence.quote должен быть одним непрерывным буквальным фрагментом одной страницы, без «...», «[…]», добавленных кавычек и склейки частей. Если для утверждения нужны несколько фрагментов, создай отдельный evidence для каждого. Ответ формулируй только в пределах этих цитат; иначе status=unknown. Не ищи источники и не делай выводов о потребности в услуге. Не добавляй другие критерии.'''
+    prompt=GUARD+SPECIFIC_ANSWER_RULES+'''Восстанови ТОЛЬКО указанные потерянные ответы по сохранённым страницам. Каждый evidence.quote должен быть одним непрерывным буквальным фрагментом одной страницы, без «...», «[…]», добавленных кавычек и склейки частей. Если для утверждения нужны несколько фрагментов, создай отдельный evidence для каждого. Ответ формулируй только в пределах этих цитат; иначе status=unknown. Не ищи источники и не делай выводов о потребности в услуге. Не добавляй другие критерии.'''
     result=pipeline.ask('extraction',prompt,{'company':name,'criteria':[by_id[cid] for cid in requested],'pages':selected_pages,'date':as_of},CitationRepairResult,max_output=2600,company_id=company_id)
     checked=verify_report(ResearchReport(summary='Перепроверка цитат',evidence=result.evidence,signals=[],contradictions=[],limitations=result.limitations),selected_pages,'website',days,as_of=as_of,company_id=company_id)
     mapping={item.id:hashlib.sha256((item.url+'\n'+' '.join(item.quote.split())).encode()).hexdigest()[:24] for item in result.evidence}
-    rewritten=[answer.model_copy(update={'evidence_ids':[mapping.get(eid,eid) for eid in answer.evidence_ids]}) for answer in result.answers]
+    rewritten=[remap_answer_evidence(answer,mapping) for answer in result.answers]
     fresh=validate_answers(rewritten,[by_id[cid] for cid in requested],checked['evidence'])
     recovered={item['criterion_id']:item for item in fresh if item['status']=='confirmed'}
     with Session() as db:
@@ -197,6 +285,14 @@ def repair_citation_losses(pipeline, company_id, wanted):
     return bool(recovered)
 
 
+SPECIFIC_ANSWER_RULES = ("Для критерия specific_values=true заполни facts: каждый элемент — конкретное "
+                         "значение и его evidence_ids. Значение должно дословно встречаться в цитатах. "
+                         "Для product_buyer_use_link используй 'продукт | покупатель | сценарий' и только "
+                         "если эта связь прямо подтверждена. Не заменяй значения словами 'да', 'есть', "
+                         "'подтверждено' и не смешивай покупателей со сценариями. Если нет прямого "
+                         "подтверждения связи, верни unknown и пустой facts.")
+
+
 def complete_base_answers(pipeline, company_id):
     """Answer the shared research contract from validated facts, without web searches."""
     from .db import Company
@@ -209,7 +305,7 @@ def complete_base_answers(pipeline, company_id):
         evidence=[e for report in company.research.values() for e in report.get('evidence',[])]
         verified=[e for e in evidence if e.get('subject_verified') and e.get('current') and e.get('scope') in ('company','product')]
     if verified:
-        response=pipeline.ask('extraction',GUARD+' Ответь на общие критерии исследования только по переданным evidence. Неподтверждённый ответ — unknown. Не выводи потребность или отсутствие свойства из молчания источника. evidence_ids только из входа.',{'criteria':criteria,'evidence':verified},BaseAnswers,max_output=3000,company_id=company_id)
+        response=pipeline.ask('extraction',GUARD+SPECIFIC_ANSWER_RULES+' Ответь на общие критерии исследования только по переданным evidence. Неподтверждённый ответ — unknown. Не выводи потребность или отсутствие свойства из молчания источника. evidence_ids только из входа.',{'criteria':criteria,'evidence':verified},BaseAnswers,max_output=3000,company_id=company_id)
         answers=validate_answers(response.answers,criteria,verified)
     else:answers=validate_answers([],criteria,[])
     with Session() as db:
@@ -218,16 +314,52 @@ def complete_base_answers(pipeline, company_id):
         db.commit()
 
 def criterion_signals(answers, evidence):
-    """Comparable, evidence-backed names for answers shared across companies."""
+    """Emit distinct feature keys only for specific, cited values in new plans."""
     from .evidence import normalized_signals
     known={e['id']:e for e in evidence if e.get('subject_verified') and e.get('current') and e.get('scope') in ('company','product')}
     signals=[]
     for answer in answers:
         if answer.get('status')!='confirmed':continue
-        ids=list(dict.fromkeys(i for i in answer.get('evidence_ids',[]) if i in known))
-        if not ids:continue
-        signals.append({'name':'criterion_'+answer['criterion_id'],'label':answer['criterion_id'],'state':'confirmed','confidence':'HIGH','evidence_ids':ids,'explanation':answer.get('answer','')})
+        if answer.get('value_specific'):
+            for fact in answer.get('facts',[]):
+                ids=list(dict.fromkeys(i for i in fact.get('evidence_ids',[]) if i in known))
+                value=normalized_value(fact.get('value',''))
+                if not ids or not value:continue
+                digest=hashlib.sha256(value.encode()).hexdigest()[:16]
+                signals.append({'name':f"criterion_{answer['criterion_id']}__{digest}",
+                                'label':fact['value'],'state':'confirmed','confidence':'HIGH',
+                                'evidence_ids':ids,'explanation':fact['value']})
+        else:
+            # Historical campaign-v1 answers were frozen without concrete values.
+            ids=list(dict.fromkeys(i for i in answer.get('evidence_ids',[]) if i in known))
+            if ids:signals.append({'name':'criterion_'+answer['criterion_id'],'label':answer['criterion_id'],
+                                   'state':'confirmed','confidence':'HIGH','evidence_ids':ids,
+                                   'explanation':answer.get('answer','')})
     return normalized_signals(signals)
+
+
+def merge_base_answers(previous, fresh):
+    """Keep separately cited values found on earlier website pages."""
+    by_id={answer['criterion_id']:answer for answer in previous}
+    for answer in fresh:
+        cid=answer['criterion_id']
+        old=by_id.get(cid)
+        if answer['status']!='confirmed':
+            if old is None:by_id[cid]=answer
+            continue
+        if old and old.get('status')=='confirmed' and old.get('value_specific') and answer.get('value_specific'):
+            facts={normalized_value(fact['value']):dict(fact) for fact in old.get('facts',[])}
+            for fact in answer.get('facts',[]):
+                key=normalized_value(fact['value'])
+                if key in facts:
+                    facts[key]['evidence_ids']=list(dict.fromkeys(facts[key]['evidence_ids']+fact['evidence_ids']))
+                else:facts[key]=dict(fact)
+            combined=list(facts.values())
+            by_id[cid]={**answer,'facts':combined,
+                        'answer':'; '.join(fact['value'] for fact in combined),
+                        'evidence_ids':list(dict.fromkeys(eid for fact in combined for eid in fact['evidence_ids']))}
+        else:by_id[cid]=answer
+    return list(by_id.values())
 
 class BasePageResult(Strict):
     report: ResearchReport
@@ -298,18 +430,15 @@ def research_base(pipeline,cid,fetch):
         # Persist the fetched page before any paid work, to survive extraction failure.
         with Session() as db:
             c=db.get(Company,cid);c.research={**c.research,'base':{**state,'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals}};db.commit()
-        result=pipeline.ask('extraction',GUARD+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL страницы. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.',{'company':name,'legal_names':legal_names,'criteria':criteria,'pages':[page],'date':config['research_as_of']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
+        result=pipeline.ask('extraction',GUARD+SPECIFIC_ANSWER_RULES+' Извлеки атомарные признаки и заполни критерии. report.evidence: точная цитата и URL страницы. answers используют id из report.evidence. Неизвестное — unknown; не делай вывод о потребности. Указывай опровержения.',{'company':name,'legal_names':legal_names,'criteria':criteria,'pages':[page],'date':config['research_as_of']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
         checked=verify_report(result.report,[page],'website',config['social_forum_days'],as_of=config['research_as_of'],company_id=cid)
         import hashlib
         mapping={e.id:hashlib.sha256((e.url+'\n'+' '.join(e.quote.split())).encode()).hexdigest()[:24] for e in result.report.evidence}
-        rewritten=[a.model_copy(update={'evidence_ids':[mapping.get(i,i) for i in a.evidence_ids]}) for a in result.answers]
+        rewritten=[remap_answer_evidence(a,mapping) for a in result.answers]
         fresh=validate_answers(rewritten,criteria,checked['evidence'])
         accepted_by_id={a['criterion_id']:a for a in fresh}
         citation_losses.update(a.criterion_id for a in rewritten if a.status=='confirmed' and accepted_by_id[a.criterion_id]['status']=='unknown')
-        prior={a['criterion_id']:a for a in answers}
-        for a in fresh:
-            if a['status']=='confirmed' or a['criterion_id'] not in prior:prior[a['criterion_id']]=a
-        answers=list(prior.values());citation_losses.difference_update(a['criterion_id'] for a in answers if a['status']=='confirmed');evidence=list({e['id']:e for e in evidence+checked['evidence']}.values());signals=normalized_signals(signals+checked['signals'])
+        answers=merge_base_answers(answers,fresh);citation_losses.difference_update(a['criterion_id'] for a in answers if a['status']=='confirmed');evidence=list({e['id']:e for e in evidence+checked['evidence']}.values());signals=normalized_signals(signals+checked['signals'])
         attempted.append(url);queue.extend(links(page))
         state={'pages':pages,'attempted_urls':attempted,'errors':errors,'answers':answers,'evidence':evidence,'signals':signals,'citation_losses':sorted(citation_losses),'summary':'Базовый сбор по критериям','limitations':checked['limitations'],'contradictions':checked['contradictions']}
         with Session() as db:
@@ -344,7 +473,7 @@ class CampaignSegments(Segments):
     research_requests: list[TargetedQuestion] = Field(default_factory=list,max_length=12)
 
 CAMPAIGN_PROMPT=GUARD+'''
-В required_signals, supporting_signals и contradicting_signals записывай ТОЛЬКО точные значения поля name из profiles.examples.signals. Не пиши объяснения, метки, названия компаний, confidence, evidence_ids или предложения внутри этих списков. Общие подтверждённые критерии имеют имена criterion_products, criterion_audiences и т. д. Если у компаний разные имена одного признака, используй общий criterion_*. Найди повторяющиеся ситуации по всей переданной выборке и предложи общие кампании, не отдельное предложение каждой компании. Минимум две компании на сегмент. Один сегмент — одна услуга, общая аргументация и следующий шаг; одинаковые стратегии объединяй. Используй base_research и подтверждённые сигналы.
+В required_signals, supporting_signals и contradicting_signals записывай ТОЛЬКО точные значения поля name из profiles.examples.signals. Не пиши объяснения, метки, названия компаний, confidence, evidence_ids или предложения внутри этих списков. Новые базовые критерии дают только конкретные признаки criterion_<id>__<hash> с различающими значениями в label; общий criterion_<id> не подтверждает общность ситуации. Если у компаний разные названия близких фактов, предложи сближение лишь как кандидата для последующей проверки, не подменяй реальные имена признаков общим. Найди повторяющиеся ситуации по всей переданной выборке и предложи общие кампании, не отдельное предложение каждой компании. Минимум две компании на сегмент. Один сегмент — одна услуга, общая аргументация и следующий шаг; одинаковые стратегии объединяй. Используй base_research и подтверждённые сигналы.
 applicability: минимум два содержательных признака уместности услуги; допускается один официальный источник. Нельзя заявлять проблему или потребность. hypothesis: минимум два независимых сигнала и осторожная гипотеза. event: те же требования плюс датированный актуальный event_signals. Required только HIGH, supporting HIGH/MEDIUM. LOW не используй. Не придумывай услуги, признаки или доказательства. Отрасль сама по себе не сегмент. cooperation_proposal, shared_message и next_step общие для группы. Гипотеза применимости объясняет уместность сотрудничества, а не диагноз. Если оснований нет, объясни abstention_reason и missing_data, доступные в публичных источниках.
 '''
 CAMPAIGN_PROMPT+=' Если конкретный пробел мешает проверить ОБЩЕГО кандидата, добавь research_requests: существующий candidate_id, минимум две company_ids из примеров выборки, criterion_id из base_research.answers, конкретный вопрос проверки или опровержения и влияние ответа на решение. Не создавай запрос без кандидата, личный оффер или общее задание исследовать глубже. Запрос необязателен; если данных достаточно, оставь пусто.'

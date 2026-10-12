@@ -254,7 +254,7 @@ class Pipeline:
                 if result.segments:merged=[s.model_dump() for s in result.segments]
         if campaign_mode and merged:
             from .campaigns import repair_citation_losses
-            needed={name.removeprefix('criterion_') for candidate in merged for name in candidate['required_signals']+candidate['supporting_signals'] if name.startswith('criterion_')}
+            needed={name.removeprefix('criterion_').split('__',1)[0] for candidate in merged for name in candidate['required_signals']+candidate['supporting_signals'] if name.startswith('criterion_')}
             repaired=False
             for company in companies:
                 lost=set(company.research.get('base',{}).get('citation_losses',[])) & needed

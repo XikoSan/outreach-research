@@ -1,5 +1,5 @@
 import pytest
-from app.campaigns import CampaignResearchPlan,validate_plan,validate_answers,CriterionAnswer,BASE_CRITERIA,prepare_campaign_plan
+from app.campaigns import CampaignResearchPlan,validate_plan,validate_answers,CriterionAnswer,BASE_CRITERIA,LEGACY_BASE_CRITERIA,prepare_campaign_plan
 from app.db import Session,Run
 from test_pipeline import new_run
 
@@ -20,8 +20,8 @@ def test_unknown_is_mandatory_and_base_ids_cannot_be_replaced():
     with pytest.raises(ValueError):validate_plan(value,SOURCE)
 
 def test_unbound_evidence_cannot_fill_base_answers():
-    a=CriterionAnswer(criterion_id='products',status='confirmed',answer='Products',evidence_ids=['e'])
-    ev={'id':'e','scope':'company','current':True,'quote':'Exact source statement','subject_verified':False}
+    a=CriterionAnswer(criterion_id='products',status='confirmed',answer='Products',evidence_ids=['e'],facts=[{'value':'Industrial products','evidence_ids':['e']}])
+    ev={'id':'e','scope':'company','current':True,'quote':'Company sells Industrial products.','subject_verified':False}
     assert all(x['status']=='unknown' for x in validate_answers([a],BASE_CRITERIA,[ev]))
     ev['subject_verified']=True
     checked=validate_answers([a],BASE_CRITERIA,[ev])
@@ -39,10 +39,60 @@ def test_campaign_plan_reuses_matching_source_and_versions_changes(client):
     fake=Fake();prepare_campaign_plan(fake);prepare_campaign_plan(fake)
     assert fake.calls==1
     with Session() as db:
+        saved=db.get(Run,rid).reports['campaign_plan']
+        assert saved['version']=='campaign-v2'
+        assert all(c['specific_values'] for c in saved['base_criteria']+saved['plan']['criteria'])
+    with Session() as db:
         r=db.get(Run,rid);r.context_snapshot={'summary':SOURCE+' Уточнение.'};db.commit()
     prepare_campaign_plan(fake)
     assert fake.calls==2
     with Session() as db:assert len(db.get(Run,rid).reports['campaign_plan_history'])==1
+
+
+def test_offer_plan_repairs_only_invalid_literal_quote_once(client):
+    from app.campaigns import OfferQuoteCorrections
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid);run.context_snapshot={'summary':SOURCE};db.commit()
+    class Fake:
+        id=rid
+        calls=[]
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            self.calls.append(schema)
+            if schema is CampaignResearchPlan:
+                result=plan()
+                result.offers[0].facts[0].source_quote='Недословная цитата об исследовании покупателей'
+                return result
+            assert schema is OfferQuoteCorrections
+            assert len(payload['invalid_facts'])==1
+            return OfferQuoteCorrections(corrections=[{'offer_index':0,'fact_index':0,
+                                                      'source_quote':SOURCE}])
+    fake=Fake()
+    prepared=prepare_campaign_plan(fake)
+    assert prepared.offers[0].facts[0].source_quote==SOURCE
+    assert fake.calls==[CampaignResearchPlan,OfferQuoteCorrections]
+    prepare_campaign_plan(fake)
+    assert len(fake.calls)==2
+
+
+def test_offer_plan_rejects_unsupportable_quote_after_repair(client):
+    from app.campaigns import OfferQuoteCorrections
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid);run.context_snapshot={'summary':SOURCE};db.commit()
+    class Fake:
+        id=rid
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            if schema is CampaignResearchPlan:
+                result=plan()
+                result.offers[0].facts[0].source_quote='Выдуманный текст в роли цитаты предложения'
+                return result
+            return OfferQuoteCorrections(corrections=[{'offer_index':0,'fact_index':0,
+                                                      'source_quote':''}])
+    with pytest.raises(ValueError,match='не подтверждён'):
+        prepare_campaign_plan(Fake())
+    with Session() as db:
+        assert not db.get(Run,rid).reports.get('campaign_plan')
 
 
 def test_research_plan_endpoint_is_read_only(client):
@@ -84,7 +134,7 @@ def test_campaign_pipeline_shared_segment_and_early_stop(client,monkeypatch):
     with Session() as db:
         r=db.get(Run,rid);r.context_snapshot={'summary':SOURCE,'name':'Research'};r.config={**r.config,'pipeline_version':3,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'};db.commit()
     fetches=[]
-    text='Company sells technical products. Buyers use products in different applications.'
+    text='Company sells technical products. Manufacturers use technical products for equipment maintenance.'
     def fetch(url):
         fetches.append(url)
         return {'url':url,'text':text,'links':[{'url':url+'/products','label':'products'}]}
@@ -96,9 +146,13 @@ def test_campaign_pipeline_shared_segment_and_early_stop(client,monkeypatch):
             if schema is CampaignResearchPlan:return plan()
             if schema is BasePageResult:
                 url=payload['pages'][0]['url']
-                evidence=[{'id':str(i),'url':url,'quote':q,'published_at':None,'scope':'company','origin':url} for i,q in enumerate(['Company sells technical products.','Buyers use products in different applications.'])]
+                evidence=[{'id':str(i),'url':url,'quote':q,'published_at':None,'scope':'company','origin':url} for i,q in enumerate(['Company sells technical products.','Manufacturers use technical products for equipment maintenance.'])]
                 signals=[{'name':n,'state':'confirmed','confidence':'HIGH','evidence_ids':[str(i)],'explanation':'Direct observation'} for i,n in enumerate(['technical_products','multiple_applications'])]
-                return BasePageResult(report={'summary':'Products','evidence':evidence,'signals':signals,'contradictions':[],'limitations':[]},answers=[{'criterion_id':c['id'],'status':'confirmed','answer':'Observed','evidence_ids':['0','1']} for c in payload['criteria']])
+                facts={'products':('technical products',['0']),'buyer_types':('Manufacturers',['1']),
+                       'application_scenarios':('equipment maintenance',['1']),
+                       'product_buyer_use_link':('technical products | Manufacturers | equipment maintenance',['1']),
+                       'use_cases':('equipment maintenance',['1'])}
+                return BasePageResult(report={'summary':'Products','evidence':evidence,'signals':signals,'contradictions':[],'limitations':[]},answers=[{'criterion_id':c['id'],'status':'confirmed','answer':facts[c['id']][0],'evidence_ids':facts[c['id']][1], 'facts':[{'value':facts[c['id']][0],'evidence_ids':facts[c['id']][1]}]} for c in payload['criteria']])
             if schema is CampaignSegments:
                 self.segment_calls+=1
                 return CampaignSegments(segments=[{'id':'candidate','name':'Technical products','definition':'Shared situation','offer_id':'research','hypothesis':'Research may be relevant','confidence':'MEDIUM','required_signals':['technical_products'],'supporting_signals':['multiple_applications'],'contradicting_signals':[],'outreach_angle':'Shared research proposal','diagnostic_question':'Relevant?','allowed_claims':[],'forbidden_claims':['Your sales are falling'],'basis_type':'applicability','cooperation_proposal':'Research buyer selection criteria','next_step':'Discuss research scope','shared_message':'We offer buyer criteria research','event_signals':[]}])
@@ -149,7 +203,7 @@ def test_citation_loss_repairs_from_saved_page_without_new_fetch(client):
     with Session() as db:
         run=db.get(Run,rid)
         run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
-        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':LEGACY_BASE_CRITERIA}}
         company=db.query(Company).filter_by(run_id=rid).first();cid=company.id
         db.commit()
     page_text='Products include lifts. Schools use lifts. Hospitals use lifts.'
@@ -199,7 +253,7 @@ def test_segmentation_rechecks_company_with_no_initial_signals(client):
     with Session() as db:
         run=db.get(Run,rid)
         run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
-        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':LEGACY_BASE_CRITERIA}}
         companies=db.query(Company).filter_by(run_id=rid).order_by(Company.id).all()
         first,second=companies
         for company in companies:company.identity='CONFIRMED';company.stage='PROFILE_READY'
@@ -243,7 +297,7 @@ def test_citation_repair_does_not_trust_unbound_saved_page(client):
     with Session() as db:
         run=db.get(Run,rid)
         run.config={**run.config,'methodology_version':'campaign-v1','research_as_of':'2026-10-10'}
-        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':BASE_CRITERIA}}
+        run.reports={**run.reports,'campaign_plan':{'version':'campaign-v1','source_hash':'test','plan':plan().model_dump(),'base_criteria':LEGACY_BASE_CRITERIA}}
         company=db.query(Company).filter_by(run_id=rid).first();cid=company.id
         company.profile={'base_research':{'answers':[{'criterion_id':'products','status':'unknown','answer':'Не установлено','evidence_ids':[]}]},'signals':[]}
         company.research={'base':{'pages':[{'url':'https://unbound.example','text':'Products include lifts.'}],'citation_losses':['products']}}
@@ -303,7 +357,7 @@ def test_base_unreadable_site_has_insufficient_data_without_model_call(client):
         run.config = {**run.config, 'pipeline_version': 3, 'methodology_version': 'campaign-v1',
                       'research_as_of': '2026-10-10', 'max_website_pages': 2}
         run.reports = {**run.reports, 'campaign_plan': {'version': 'campaign-v1', 'source_hash': 'test',
-                         'plan': plan().model_dump(), 'base_criteria': BASE_CRITERIA}}
+                         'plan': plan().model_dump(), 'base_criteria': LEGACY_BASE_CRITERIA}}
         cid = db.query(Company).filter_by(run_id=rid).first().id
         db.commit()
 
@@ -336,3 +390,81 @@ def test_base_only_pilot_cannot_start_full_pipeline(client):
     assert 'только базового сбора' in response.json()['detail']
     with Session() as db:
         assert db.get(Run, rid).status == original_status
+
+
+def test_new_plan_separates_buyers_uses_and_explicit_product_relationship():
+    from app.campaigns import criterion_signals
+    def profile(quote, buyer, use):
+        evidence=[{'id':'e','scope':'company','current':True,'subject_verified':True,'quote':quote}]
+        values={'products':'Machines','buyer_types':buyer,'application_scenarios':use,
+                'product_buyer_use_link':f'Machines | {buyer} | {use}'}
+        answers=[CriterionAnswer(criterion_id=cid,status='confirmed',answer=value,evidence_ids=['e'],
+                                 facts=[{'value':value,'evidence_ids':['e']}]) for cid,value in values.items()]
+        checked=validate_answers(answers,BASE_CRITERIA,evidence)
+        assert all(a['status']=='confirmed' for a in checked)
+        return {s['name'] for s in criterion_signals(checked,evidence)}
+    factories=profile('Machines serve factories for sheet cutting.','factories','sheet cutting')
+    hospitals=profile('Machines serve hospitals for sterilization.','hospitals','sterilization')
+    assert len(factories)==len(hospitals)==4
+    assert len(factories & hospitals)==1  # Product matches; buyers, tasks, and relation do not.
+    assert not {'criterion_buyer_types','criterion_application_scenarios','criterion_product_buyer_use_link'} & factories
+
+
+def test_new_plan_rejects_generic_or_unlinked_answers():
+    evidence=[{'id':'a','scope':'company','current':True,'subject_verified':True,'quote':'Machines serve factories.'},
+              {'id':'b','scope':'company','current':True,'subject_verified':True,'quote':'Used for sheet cutting.'}]
+    answers=[CriterionAnswer(criterion_id='buyer_types',status='confirmed',answer='confirmed',evidence_ids=['a'],
+                             facts=[{'value':'confirmed','evidence_ids':['a']}]),
+             CriterionAnswer(criterion_id='product_buyer_use_link',status='confirmed',
+                             answer='Machines | factories | sheet cutting',evidence_ids=['a','b'],
+                             facts=[{'value':'Machines | factories | sheet cutting','evidence_ids':['a','b']}])]
+    checked=validate_answers(answers,BASE_CRITERIA,evidence)
+    assert {a['criterion_id'] for a in checked if a['status']=='confirmed'}==set()
+
+
+def test_historical_plan_is_reused_with_its_frozen_criteria(client):
+    import hashlib
+    from app.campaigns import VERSION
+    assert VERSION=='campaign-v2'
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.context_snapshot={'summary':SOURCE}
+        run.reports={'campaign_plan':{'version':'campaign-v1','source_hash':hashlib.sha256(SOURCE.encode()).hexdigest(),
+                                      'plan':plan().model_dump(),'base_criteria':LEGACY_BASE_CRITERIA}}
+        db.commit()
+    class NoCalls:
+        id=rid
+        def ask(self,*args,**kwargs):raise AssertionError('Historical plan must remain frozen')
+    prepared=prepare_campaign_plan(NoCalls())
+    assert prepared.criteria[0].id=='use_cases'
+    with Session() as db:
+        assert db.get(Run,rid).reports['campaign_plan']['version']=='campaign-v1'
+
+
+def test_specific_answers_preserve_distinct_cited_values_across_pages():
+    from app.campaigns import merge_base_answers, criterion_signals
+    first={'criterion_id':'buyer_types','status':'confirmed','answer':'Factories',
+           'evidence_ids':['a'],'value_specific':True,
+           'facts':[{'value':'Factories','evidence_ids':['a']}]}
+    second={'criterion_id':'buyer_types','status':'confirmed','answer':'Hospitals',
+            'evidence_ids':['b'],'value_specific':True,
+            'facts':[{'value':'Hospitals','evidence_ids':['b']}]}
+    merged=merge_base_answers([first],[second])[0]
+    assert merged['answer']=='Factories; Hospitals'
+    assert merged['evidence_ids']==['a','b']
+    assert [fact['value'] for fact in merged['facts']]==['Factories','Hospitals']
+    evidence=[{'id':key,'scope':'company','current':True,'subject_verified':True}
+              for key in ('a','b')]
+    assert len(criterion_signals([merged],evidence))==2
+    assert merge_base_answers([merged],[{**second, 'facts':[{'value':'Factories','evidence_ids':['b']}]}])[0]['facts'][0]['evidence_ids']==['a','b']
+
+
+def test_product_buyer_use_link_rejects_unrelated_sentences():
+    evidence=[{'id':'e','scope':'company','current':True,'subject_verified':True,
+               'quote':'Machines serve factories. Hospitals use sterilization products.'}]
+    answer=CriterionAnswer(criterion_id='product_buyer_use_link',status='confirmed',
+                           answer='Machines | Hospitals | sterilization',evidence_ids=['e'],
+                           facts=[{'value':'Machines | Hospitals | sterilization','evidence_ids':['e']}])
+    checked=validate_answers([answer],BASE_CRITERIA,evidence)
+    assert checked[0]['status']=='unknown'

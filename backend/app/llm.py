@@ -1,13 +1,14 @@
 """Durable API operations with conservative reservations and response checkpoints."""
 import hashlib
 import json
+import time
 from openai import OpenAI, APIStatusError
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import Session, Run, PromptPackage, ModelCall, ModelAttempt, uid, log
 from . import credentials
-from .providers import API_GATE, OpenAIAdapter
+from .providers import API_GATE, OpenAIAdapter, estimate_request_tokens
 
 RATES = {'gpt-6-luna': (.10, .50), 'gpt-6.1-sol': (2., 10.)}
 
@@ -64,12 +65,22 @@ class Gateway:
             target=db.get(PromptPackage,self.package_id) if getattr(self,'package_id',None) else run
             if target.status!='RUNNING':raise RunPaused()
             if cached and cached.state=='COMPLETE' and cached.result is not None:return schema.model_validate(cached.result)
+        gate_ticket=None
+        gate_wait_seconds=0.0
+        gate_estimated_tokens=0
         if getattr(self,'profile_credentials',False):
             def active():
                 with Session() as db:
                     target=PromptPackage if getattr(self,'package_id',None) else Run
                     if db.get(target,getattr(self,'package_id',None) or self.run_id).status!='RUNNING':raise RunPaused()
-            API_GATE.wait(len(text.encode())+max_output,active)
+            gate_estimated_tokens=estimate_request_tokens(
+                instructions,text,json.dumps(schema.model_json_schema(),ensure_ascii=False,sort_keys=True),
+                max_output,search=search)
+            gate_started=time.monotonic()
+            gate_ticket=API_GATE.wait(gate_estimated_tokens,active)
+            gate_wait_seconds=time.monotonic()-gate_started
+        gate_metrics={'gate_wait_seconds':round(gate_wait_seconds,3),
+                      'gate_estimated_tokens':gate_estimated_tokens}
         with Session() as db:
             research = db.get(Run, self.run_id)
             package_id=getattr(self,'package_id',None)
@@ -113,39 +124,55 @@ class Gateway:
             if saved:
                 if not db.query(ModelAttempt).filter_by(operation_id=key).count():
                     db.add(ModelAttempt(operation_id=key,state=saved.state,response_id=saved.response_id,cost=saved.cost,reservation=saved.reservation,metrics={**saved.metrics,'legacy':True}))
-                claimed=db.execute(update(ModelCall).where(ModelCall.id==key,ModelCall.state.in_(['REJECTED','RECONCILED'])).values(state='STARTED',reservation=upper,result=None,cost=0,response_id=None,metrics={}))
+                claimed=db.execute(update(ModelCall).where(ModelCall.id==key,ModelCall.state.in_(['REJECTED','RECONCILED'])).values(state='STARTED',reservation=upper,result=None,cost=0,response_id=None,metrics=gate_metrics))
                 if not claimed.rowcount:db.rollback();raise UncertainCall('Операция уже выполняется')
             else:
-                db.add(ModelCall(id=key,run_id=self.run_id,company_id=company_id,package_id=package_id,role=role,model=model,state='STARTED',reservation=upper,search=search))
+                db.add(ModelCall(id=key,run_id=self.run_id,company_id=company_id,package_id=package_id,role=role,model=model,state='STARTED',reservation=upper,search=search,metrics=gate_metrics))
             try:db.flush()
             except IntegrityError as exc:
                 db.rollback();raise UncertainCall('Операция уже зарезервирована другим исполнителем') from exc
             attempt_id=uid()
-            db.add(ModelAttempt(id=attempt_id,operation_id=key,reservation=upper))
+            db.add(ModelAttempt(id=attempt_id,operation_id=key,reservation=upper,metrics=gate_metrics))
             log(db,self.run_id,role,'API-операция зарезервирована',company_id,{'call_id':key,'reserved':upper,'model':model})
             db.commit()
         kwargs = {'tools':[{'type':'web_search','search_context_size':'low'}], 'max_tool_calls':1} if search else {}
+        api_started=time.monotonic()
         try:
             # Parse manually after recording usage, so invalid JSON does not hide billing.
             response = OpenAIAdapter().generate(self.client,dict(model=model,instructions=instructions,input=[{'role':'user','content':text}],text={'format':{'type':'json_schema','name':schema.__name__,'strict':True,'schema':strict_schema(schema.model_json_schema())}},max_output_tokens=max_output,reasoning={'effort':'low' if role in ('discovery','extraction') else 'medium'},store=False,**kwargs),stream=credentials.uses_chatgpt(run))
         except Exception as error:
-            if isinstance(error,APIStatusError) and error.status_code==429:API_GATE.rejected(error.response.headers.get('retry-after'))
+            api_seconds=round(time.monotonic()-api_started,3)
+            if isinstance(error,APIStatusError) and error.status_code==429:
+                # A rejected request still counts toward RPM, but no model tokens
+                # were consumed. Keep the cooldown without blocking TPM for a minute.
+                API_GATE.settle(gate_ticket,0)
+                API_GATE.rejected(error.response.headers)
             definitive = (isinstance(error, APIStatusError) and error.status_code in (400,401,403,404,422,429)) or 'subscription sharing usage limit' in str(error).lower()
             with Session() as db:
                 call=db.get(ModelCall,key); call.state='REJECTED' if definitive else 'UNCERTAIN'
                 attempt=db.get(ModelAttempt,attempt_id);attempt.state=call.state
-                attempt.metrics={'error_type':type(error).__name__}
+                call.metrics={**gate_metrics,'api_seconds':api_seconds,'error_type':type(error).__name__}
+                attempt.metrics=call.metrics
                 if definitive:db.execute(update(target).where(target.id==target_id).values(reserved=target.reserved-upper))
                 log(db,self.run_id,role,'API отклонил запрос' if definitive else 'Исход API-вызова неизвестен; резерв сохранён',company_id,{'call_id':key,'state':call.state}); db.commit()
             if not definitive:raise UncertainCall('API-вызов прерван; требуется сверка расхода в журнале.') from error
             raise
+        api_seconds=round(time.monotonic()-api_started,3)
         usage=response.usage
-        if usage is None:raise UncertainCall('API не вернул usage; резерв сохранён для сверки.')
+        if usage is None:
+            with Session() as db:
+                call=db.get(ModelCall,key);call.state='UNCERTAIN'
+                call.metrics={**gate_metrics,'api_seconds':api_seconds,'error_type':'MissingUsage'}
+                attempt=db.get(ModelAttempt,attempt_id);attempt.state='UNCERTAIN';attempt.metrics=call.metrics
+                log(db,self.run_id,role,'API не вернул usage; резерв сохранён',company_id,{'call_id':key})
+                db.commit()
+            raise UncertainCall('API не вернул usage; резерв сохранён для сверки.')
+        API_GATE.settle(gate_ticket,usage.input_tokens+usage.output_tokens)
         searches=sum(1 for x in response.output if x.type=='web_search_call')
         # Configured tariff estimate; reserves are separate and cached discounts remain explicit.
         actual=(usage.input_tokens*inp+usage.output_tokens*out)/1_000_000+searches*.01
         raw_usage=usage.model_dump() if hasattr(usage,'model_dump') else vars(usage)
-        metrics={'input_tokens':usage.input_tokens,'output_tokens':usage.output_tokens,'searches':searches,'estimated':True,'raw_usage':raw_usage,'tariff_version':'configured-base-v1','cached_discount_applied':False}
+        metrics={'input_tokens':usage.input_tokens,'output_tokens':usage.output_tokens,'searches':searches,'estimated':True,'raw_usage':raw_usage,'tariff_version':'configured-base-v1','cached_discount_applied':False,**gate_metrics,'api_seconds':api_seconds}
         parsed=None; failure=None
         try:parsed=schema.model_validate_json(response.output_text)
         except Exception as error:

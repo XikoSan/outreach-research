@@ -1,8 +1,9 @@
-"""Run only the base research stage for a separate, paused campaign pilot.
+"""Run only base collection for a separate pilot, with bounded optional concurrency.
 
-Does not segment, generate prompts, export, or touch the large source run.
+Does not segment, generate prompts, export, or touch the source research run.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -32,24 +33,61 @@ def snapshot(run_id):
         }
 
 
+def pilot_company_ids(run, companies):
+    pilot = run.reports['pilot']
+    by_site = {company.resource: company.id for company in companies}
+    if 'sites' in pilot:
+        if len(by_site) != len(companies) or set(pilot['sites']) != set(by_site):
+            raise ValueError('Список сайтов пилота изменился')
+        return [by_site[site] for site in pilot['sites']]
+    groups = pilot.get('imported_groups', {})
+    ordered = [cid for label in ('random_core', 'diagnostic', 'mixed') for cid in groups.get(label, [])]
+    if len(ordered) != len(set(ordered)) or set(ordered) != {company.id for company in companies}:
+        raise ValueError('Список компаний стратифицированного пилота изменился')
+    return ordered
+
+
+def eligible_company_ids(ordered, companies, uncertain_company_ids):
+    by_id = {company.id: company for company in companies}
+    return [cid for cid in ordered if cid not in uncertain_company_ids
+            and by_id[cid].research.get('base', {}).get('state') != 'COMPLETE']
+
+
+def research_one(run_id, company_id):
+    pipeline = Pipeline(run_id)
+    try:
+        research_base(pipeline, company_id, fetch)
+        with Session() as db:
+            losses = set(db.get(Company, company_id).research.get('base', {}).get('citation_losses', []))
+        if losses:
+            repair_citation_losses(pipeline, company_id, losses)
+    finally:
+        if pipeline.gw.client:
+            pipeline.gw.client.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run_id')
     parser.add_argument('--company-limit', type=int, default=3)
+    parser.add_argument('--concurrency', type=int, default=1)
     parser.add_argument('--max-estimated-usd', type=float, default=0.12)
     parser.add_argument('--max-seconds', type=float, default=1200)
     args = parser.parse_args()
-    if not 1 <= args.company_limit <= 30 or not 0 < args.max_estimated_usd <= 1 or args.max_seconds < 60:
+    if not 1 <= args.company_limit <= 30 or not 1 <= args.concurrency <= 4 or not 0 < args.max_estimated_usd <= 5 or args.max_seconds < 60:
         raise SystemExit('Unsafe pilot limit')
     with Session() as db:
         run = db.get(Run, args.run_id)
         if not run or run.status != 'PAUSED' or run.reports.get('pilot', {}).get('kind') != 'base_only':
             raise SystemExit('Expected a paused base-only pilot')
-        sites = run.reports['pilot']['sites']
-        companies = {company.resource: company for company in db.query(Company).filter_by(run_id=run.id)}
-        if set(sites) != set(companies):
-            raise SystemExit('Pilot company list changed')
-        pending = [companies[site].id for site in sites if companies[site].research.get('base', {}).get('state') != 'COMPLETE']
+        companies = db.query(Company).filter_by(run_id=run.id).all()
+        try:
+            ordered = pilot_company_ids(run, companies)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        uncertain = {cid for (cid,) in db.query(ModelCall.company_id).filter(
+            ModelCall.run_id == run.id, ModelCall.state.in_(['STARTED', 'UNCERTAIN'])).all() if cid}
+        pending = eligible_company_ids(ordered, companies, uncertain)
         if not pending:
             print(json.dumps(snapshot(args.run_id), ensure_ascii=False))
             return
@@ -62,28 +100,33 @@ def main():
     started = monotonic()
     pipeline = Pipeline(args.run_id)
     problem = None
+    initially_ready = snapshot(args.run_id)['base_ready']
     processed = 0
     try:
         prepare_campaign_plan(pipeline)
-        for company_id in selected:
-            if monotonic() - started >= args.max_seconds:
-                problem = 'Pilot wall-time guard reached'
-                break
-            with Session() as db:
-                if db.get(Run, args.run_id).spent >= args.max_estimated_usd:
-                    problem = 'Estimated pilot spend guard reached'
+        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            for offset in range(0, len(selected), args.concurrency):
+                if monotonic() - started >= args.max_seconds:
+                    problem = 'Pilot wall-time guard reached'
                     break
-            research_base(pipeline, company_id, fetch)
-            with Session() as db:
-                losses = set(db.get(Company, company_id).research.get('base', {}).get('citation_losses', []))
-            if losses:
-                repair_citation_losses(pipeline, company_id, losses)
-            processed += 1
-            current = snapshot(args.run_id)
-            print(json.dumps({'processed_this_batch': processed, 'base_ready': current['base_ready'],
-                              'estimated_spent_usd': current['estimated_spent_usd'],
-                              'base_pages': current['base_pages'], 'confirmed_answers': current['confirmed_answers']},
-                             ensure_ascii=False), flush=True)
+                with Session() as db:
+                    if db.get(Run, args.run_id).spent >= args.max_estimated_usd:
+                        problem = 'Estimated pilot spend guard reached'
+                        break
+                wave = selected[offset:offset + args.concurrency]
+                futures = [pool.submit(research_one, args.run_id, cid) for cid in wave]
+                failures = []
+                for future in futures:
+                    try: future.result()
+                    except Exception as error: failures.append(error)
+                current = snapshot(args.run_id)
+                processed = current['base_ready'] - initially_ready
+                if failures: raise failures[0]
+                print(json.dumps({'processed_this_batch': processed, 'base_ready': current['base_ready'],
+                                  'estimated_spent_usd': current['estimated_spent_usd'],
+                                  'base_pages': current['base_pages'],
+                                  'confirmed_answers': current['confirmed_answers']},
+                                 ensure_ascii=False), flush=True)
     except Exception as error:
         problem = type(error).__name__ + ': ' + str(error)[:200]
     finally:
@@ -95,10 +138,11 @@ def main():
             run.error = problem
             pilot = dict(run.reports['pilot'])
             pilot['last_base_batch'] = {'processed': processed, 'seconds': round(monotonic() - started, 1),
+                                        'concurrency': args.concurrency,
                                         'finished_at': datetime.now(timezone.utc).isoformat(), 'error': problem}
             run.reports = {**run.reports, 'pilot': pilot}
             db.commit()
-        result = {**snapshot(args.run_id), 'batch_processed': processed,
+        result = {**snapshot(args.run_id), 'batch_processed': snapshot(args.run_id)['base_ready'] - initially_ready,
                   'batch_seconds': round(monotonic() - started, 1), 'error': problem}
         folder = Path('data/observations') / args.run_id
         folder.mkdir(parents=True, exist_ok=True)

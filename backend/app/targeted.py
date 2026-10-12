@@ -4,7 +4,8 @@ import json
 from urllib.parse import urlsplit
 from .db import Session,Run,Company
 from .schemas import Strict,CandidateSource,RESEARCH_DIRECTIONS,selected_directions
-from .campaigns import BasePageResult,validate_answers,criterion_signals,classify_campaign
+from .campaigns import (BasePageResult, SPECIFIC_ANSWER_RULES, validate_answers,
+                        remap_answer_evidence, criterion_signals, classify_campaign)
 from .prompts import GUARD,EXTRACT
 from .evidence import verify_report,normalized_signals
 from .crawler import SourceUnavailable
@@ -74,10 +75,10 @@ def perform_targeted(pipeline,requests,candidates,fetch):
                     page={**page,'subject_names':[name]}
                     if host(page['url'])==host(resource):page.update(subject_id=cid,publisher_id='company:'+cid)
                     state['pages'][url]=page;save()
-                result=pipeline.ask('extraction',EXTRACT+' Ответь также на критерий: answers ссылается на id report.evidence. Неизвестное — unknown. Не меняй общую кампанию под компанию.',{'company':name,'question':task.question,'criteria':[known_criteria[task.criterion_id]],'pages':[page],'date':config['research_as_of'],'direction':source['direction'],'freshness_days':config['social_forum_days']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
+                result=pipeline.ask('extraction',EXTRACT+SPECIFIC_ANSWER_RULES+' Ответь также на критерий: answers ссылается на id report.evidence. Неизвестное — unknown. Не меняй общую кампанию под компанию.',{'company':name,'question':task.question,'criteria':[known_criteria[task.criterion_id]],'pages':[page],'date':config['research_as_of'],'direction':source['direction'],'freshness_days':config['social_forum_days']},BasePageResult,max_output=config['extraction_tokens'],company_id=cid)
                 checked=verify_report(result.report,[page],source['direction'],config['social_forum_days'],as_of=config['research_as_of'],company_id=cid)
                 mapping={e.id:hashlib.sha256((e.url+'\n'+' '.join(e.quote.split())).encode()).hexdigest()[:24] for e in result.report.evidence}
-                answers=validate_answers([a.model_copy(update={'evidence_ids':[mapping.get(i,i) for i in a.evidence_ids]}) for a in result.answers],[known_criteria[task.criterion_id]],checked['evidence'])
+                answers=validate_answers([remap_answer_evidence(a,mapping) for a in result.answers],[known_criteria[task.criterion_id]],checked['evidence'])
                 with Session() as db:
                     c=db.get(Company,cid);report_key='targeted_'+hashlib.sha256((key+url).encode()).hexdigest()[:20]
                     c.research={**c.research,report_key:{**checked,'state':'COMPLETE','question':task.question,'pages':[page]}}
