@@ -222,7 +222,7 @@ def import_rows(db,run):
     run.config={**run.config,'sheets':[{'name':w.title,'headers':h,'rows':len(rs)} for w,h,_,_,rs in sheets]}
     wb.close()
 
-STATUS_GROUPS={'FAILED','NEEDS_REVIEW','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED','NOT_PROCESSED'}
+STATUS_GROUPS={'EXCLUDED','FAILED','NEEDS_REVIEW','INSUFFICIENT_DATA','AMBIGUOUS','UNCLASSIFIED','NOT_PROCESSED'}
 
 def export_run(db,run,root,partial=None):
     if hashlib.sha256(Path(run.source_path).read_bytes()).hexdigest()!=run.source_hash:raise ValueError('Исходный файл изменён')
@@ -259,6 +259,22 @@ def export_run(db,run,root,partial=None):
                         if c.comment:target.comment=copy(c.comment)
                     ws.row_dimensions[dest_i].height=src.row_dimensions[original_i].height
                 ws.auto_filter.ref=ws.dimensions
+            if group == 'EXCLUDED':
+                audit=out.create_sheet('Причины исключения')
+                audit.append(['Компания', 'Причина', 'Основание', 'Ссылка'])
+                unique={row.company_id for row in members}
+                for company_id in sorted(unique):
+                    company=companies[company_id]
+                    exclusion=company.profile.get('exclusion', {})
+                    urls=exclusion.get('urls', [])
+                    audit.append([company.name, exclusion.get('reason', company.reason),
+                                  exclusion.get('note', ''), urls[0] if urls else ''])
+                    for cell in audit[audit.max_row]:
+                        cell.data_type='s'
+                audit.freeze_panes='A2'
+                audit.auto_filter.ref=audit.dimensions
+                for column,width in {'A':36,'B':70,'C':70,'D':70}.items():
+                    audit.column_dimensions[column].width=width
             target=stage/folder/(group+'.xlsx');target.parent.mkdir(exist_ok=True);out.save(target);out.close()
             verified=load_workbook(target)
             for spec in run.config['sheets']:

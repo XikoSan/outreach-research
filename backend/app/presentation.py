@@ -13,8 +13,8 @@ def counts(db,rid):
     for group,stage,identity,n in rows:
         groups[group]+=n
         if stage=='PROFILE_READY' and identity=='CONFIRMED':researched+=n
-        if stage=='PROFILE_READY' or group in ATTENTION:finished+=n
-    return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION)}
+        if stage=='PROFILE_READY' or group in ATTENTION or group=='EXCLUDED':finished+=n
+    return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION),'excluded':groups['EXCLUDED']}
 
 def visible_reports(company,run):
     allowed=selected_directions(run.config)
@@ -65,8 +65,8 @@ def company_view(company,run,detail=False):
     else:
         group,reason=company.group,company.reason
     result={k:getattr(company,k) for k in ('id','name','resource','identity','stage','group','reason')}
-    result.update(segment=public_segment(segment,company.id if detail else None),signals=important[:3],evidence_count=len(ev),evidence_state='Достаточно для сегмента' if segment and group==company.group else ('Есть ограничения' if company.group in ATTENTION else 'Исследование не завершено'),evidence_reason=reason,latest_publication=max((e.get('published_at','') or '' for e in ev),default=''))
+    result.update(segment=public_segment(segment,company.id if detail else None),signals=important[:3],evidence_count=len(ev),evidence_state='Исключена из выборки' if company.group=='EXCLUDED' else 'Достаточно для сегмента' if segment and group==company.group else ('Есть ограничения' if company.group in ATTENTION else 'Исследование не завершено'),evidence_reason=reason,latest_publication=max((e.get('published_at','') or '' for e in ev),default=''))
     if detail:
-        result.update(legal_ids=company.context.get('legal_ids',[]),websites=company.context.get('websites',[]),socials=company.context.get('socials',[]),profile={**company.profile,'signals':signals},signals=signals,evidence=ev,reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in reports.items()})
+        result.update(legal_ids=company.context.get('legal_ids',[]),websites=company.context.get('websites',[]),socials=company.context.get('socials',[]),profile={**company.profile,'signals':signals},signals=signals,evidence=ev,source_urls=sorted({page['url'] for report in reports.values() for page in report.get('pages',[]) if page.get('url')}),reports={k:{a:v for a,v in report.items() if a in ('summary','state','limitations','contradictions','coverage','termination_reason','validation_version')} for k,report in reports.items()})
     if not detail and segment:result['segment']={k:segment[k] for k in ('id','name','hypothesis')}
     return result

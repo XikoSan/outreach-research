@@ -232,9 +232,16 @@ class Pipeline:
         with Session() as db:
             r=db.get(Run,self.id)
             if r.segmentation_version:return
+            from .exclusions import automatic_reason, set_excluded
+            candidates=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
+            if self.selected_ids is not None: candidates=candidates.filter(Company.id.in_(self.selected_ids))
+            for company in candidates:
+                if company.group != 'EXCLUDED' and (exclusion := automatic_reason(company, r)):
+                    set_excluded(company, *exclusion)
+            db.flush()
             campaign_mode=r.config.get('methodology_version')=='campaign-v1'
             source_filters=r.config.get('source_filters','');sender={**research_sender(r),'offers':sender_directions(research_sender(r))};max_tokens=r.config['strategy_tokens']
-            query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
+            query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED').filter(Company.group!='EXCLUDED')
             if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
             companies=query.all()
             profiles=[{'company_id':c.id,'research_as_of':r.config.get('research_as_of'),'base_research':c.profile.get('base_research',{}),'description':c.profile.get('description',''),'signals':c.profile.get('signals',[]),'contradictions':c.profile.get('contradictions',[]),'evidence':evidence_for(c),'limitations':c.profile.get('limitations',[]),'coverage_complete':c.profile.get('coverage_complete',True)} for c in companies if c.profile.get('signals')]
@@ -373,6 +380,12 @@ class Pipeline:
             query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
             if self.selected_ids is not None: query=query.filter(Company.id.in_(self.selected_ids))
             for c in query:
+                if c.group == 'EXCLUDED':
+                    continue
+                from .exclusions import automatic_reason, set_excluded
+                if exclusion := automatic_reason(c, r):
+                    set_excluded(c, *exclusion)
+                    continue
                 if r.config.get('pipeline_version',1)>=3:
                     classifier=classify_with_trace
                     if r.config.get('methodology_version')=='campaign-v1':

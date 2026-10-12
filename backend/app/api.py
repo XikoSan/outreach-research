@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import update
 from pydantic import BaseModel, Field
+from typing import Literal
 from .config import settings
 from .db import Base, engine, Session, Sender, Run, Company, SourceRow, Event, Export, ModelCall, ResearchContext, PromptPackage, uid, log, now
 from . import credentials
@@ -40,6 +41,9 @@ def get(db,model,id):
     item=db.get(model,id)
     if not item:raise HTTPException(404,'Не найдено')
     return item
+
+def export_stale(db, export):
+    return db.query(Event.id).filter(Event.run_id==export.run_id, Event.stage=='EXCLUSION', Event.created_at>export.created_at).first() is not None
 
 def run_view(r):
     result={k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segmentation_version','created_at','config','sender_snapshot','context_snapshot')}
@@ -160,7 +164,7 @@ def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=For
 def run_detail(rid:str):
     with Session() as db:
         r=get(db,Run,rid);summary=counts(db,rid)
-        return {**run_view(r),**summary,'completed_companies':summary['researched'],'connection':credentials.status(),'exports':[{'id':e.id,'manifest':e.manifest,'created_at':e.created_at} for e in db.query(Export).filter_by(run_id=rid).order_by(Export.created_at.desc())]}
+        return {**run_view(r),**summary,'completed_companies':summary['researched'],'connection':credentials.status(),'exports':[{'id':e.id,'manifest':e.manifest,'created_at':e.created_at,'stale':export_stale(db,e)} for e in db.query(Export).filter_by(run_id=rid).order_by(Export.created_at.desc())]}
 
 class RunName(BaseModel):name:str=Field(min_length=1,max_length=200)
 @app.patch('/api/runs/{rid}')
@@ -234,6 +238,49 @@ def company(cid:str):
         return {**company_view(c,db.get(Run,c.run_id),detail=True),
                 'contact_count':db.query(SourceRow).filter_by(company_id=cid).count()}
 
+class ExclusionInput(BaseModel):
+    code:Literal['NO_CURRENT_SOURCES','CEASED_OPERATIONS','DATABASE_MISMATCH']
+    note:str=Field(default='',max_length=500)
+    source_url:str=''
+
+@app.post('/api/companies/{cid}/exclusion')
+def exclude_company(cid:str,payload:ExclusionInput):
+    from .exclusions import no_current_sources, set_excluded
+    with Session() as db:
+        c=get(db,Company,cid);r=get(db,Run,c.run_id)
+        if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Сначала остановите исследование')
+        if c.group=='EXCLUDED':raise HTTPException(409,'Компания уже исключена')
+        if c.stage!='PROFILE_READY' or c.identity!='CONFIRMED':raise HTTPException(409,'Сначала завершите исследование и подтвердите компанию')
+        if payload.code=='NO_CURRENT_SOURCES':
+            if not no_current_sources(c,r):raise HTTPException(422,'Другие источники ещё доступны или не проверены')
+            sources=[]
+        else:
+            if len(payload.note.strip())<12:raise HTTPException(422,'Укажите конкретную причину')
+            sources=[{'id':'page:'+(page.get('content_hash') or page['url']),'url':page['url']}
+                     for report in c.research.values() for page in report.get('pages',[])
+                     if page.get('url')==payload.source_url]
+            if not sources:raise HTTPException(422,'Выберите сохранённую страницу компании')
+        set_excluded(c,payload.code,sources,source='reviewed',note=payload.note)
+        log(db,r.id,'EXCLUSION','Компания исключена из выборки',c.id,{'code':payload.code})
+        db.commit()
+        return company_view(c,r,detail=True)
+
+@app.delete('/api/companies/{cid}/exclusion')
+def restore_company(cid:str):
+    with Session() as db:
+        c=get(db,Company,cid);r=get(db,Run,c.run_id)
+        if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Сначала остановите исследование')
+        if c.group!='EXCLUDED':raise HTTPException(409,'Компания не исключена')
+        exclusion=c.profile.get('exclusion',{})
+        previous=exclusion.get('previous',{})
+        c.profile={key:value for key,value in c.profile.items() if key!='exclusion'}|{'exclusion_override':'include'}
+        prior=previous.get('group','UNCLASSIFIED')
+        c.group=prior if prior!='EXCLUDED' and (not prior.startswith('segment_') or any(seg['id']==prior for seg in r.segments)) else 'UNCLASSIFIED'
+        c.reason=previous.get('reason') or 'Исключение снято; компания доступна для повторной оценки'
+        log(db,r.id,'EXCLUSION','Исключение снято',c.id,{'previous_code':exclusion.get('code')})
+        db.commit()
+        return company_view(c,r,detail=True)
+
 @app.get('/api/runs/{rid}/events')
 def events(rid:str):
     with Session() as db:
@@ -253,6 +300,7 @@ def make_export(rid:str):
 def download(eid:str,file:str='results.zip'):
     with Session() as db:
         e=get(db,Export,eid)
+        if export_stale(db,e):raise HTTPException(409,'Состав выборки изменился. Создайте новый экспорт')
         if file!='results.zip' and file not in e.manifest['files']:raise HTTPException(404,'Файл не найден')
         return FileResponse(Path(e.path)/file,filename=Path(file).name)
 

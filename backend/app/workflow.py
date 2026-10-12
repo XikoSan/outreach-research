@@ -193,9 +193,14 @@ def freeze_contacts(run,rows,path):
     finally:source.close();out.close()
 
 
+def excluded_package_members(db, p):
+    return db.query(Company.id).filter(Company.run_id==p.run_id, Company.id.in_(p.selection.get('company_ids', [])), Company.group=='EXCLUDED').count()
+
 def package_view(p,detail=False):
+    with Session() as db:
+        excluded_count=excluded_package_members(db,p)
     result={k:getattr(p,k) for k in ('id','run_id','name','status','stage','error','budget','spent','reserved','created_at','recipient_type','next_step')}
-    result.update(contact_count=len(p.selection['row_ids']),company_count=len(p.selection['company_ids']),segment_name=p.segment_snapshot['name'])
+    result.update(contact_count=len(p.selection['row_ids']),company_count=len(p.selection['company_ids']),segment_name=p.segment_snapshot['name'],stale=bool(excluded_count),excluded_company_count=excluded_count)
     if detail:result.update(segment=p.segment_snapshot,sender=p.sender_snapshot,context=p.context_snapshot,selection=p.selection,prompt=p.prompt,review=p.review)
     return result
 
@@ -266,6 +271,7 @@ def resume_package(pid:str):
     with Session() as db:
         p=get(db,PromptPackage,pid)
         if p.status not in ('PAUSED','FAILED'):raise HTTPException(409,'Комплект нельзя продолжить в текущем состоянии')
+        if excluded_package_members(db,p):raise HTTPException(409,'В комплекте есть исключённые компании. Создайте новый комплект')
         if not credentials.for_run(None):raise HTTPException(409,'Добавьте API-ключ в настройках')
         p.status='QUEUED';p.error=None;db.commit();return package_view(p)
 
@@ -274,6 +280,7 @@ def package_download(pid:str,file:Literal['contacts.xlsx','prompt.md','package.z
     with Session() as db:
         p=get(db,PromptPackage,pid)
         if p.status!='COMPLETED':raise HTTPException(409,'Комплект ещё не готов')
+        if excluded_package_members(db,p):raise HTTPException(409,'В комплекте есть исключённые компании. Создайте новый комплект')
         return FileResponse(Path(p.path)/file,filename=file)
 
 
@@ -281,6 +288,7 @@ def generate_package(pid,gateway=None):
     with Session() as db:
         p=db.get(PromptPackage,pid);rid=p.run_id
         if p.status!='RUNNING':raise RunPaused()
+        if excluded_package_members(db,p):raise ValueError('В комплекте есть исключённые компании. Создайте новый комплект')
         sender={k:v for k,v in p.sender_snapshot['profile'].items() if k not in ('offers','description','materials')}
         payload={'segment':p.segment_snapshot,'sender':sender,'research_context':p.context_snapshot.get('prepared_text') or p.context_snapshot.get('source_text') or p.context_snapshot.get('summary',''),'recipient_type':p.recipient_type,'next_step':p.next_step,'contacts':len(p.selection['row_ids'])}
         prompt=p.prompt;review=p.review
@@ -306,6 +314,7 @@ def generate_package(pid,gateway=None):
     with Session() as db:
         p=db.get(PromptPackage,pid);folder=Path(p.path)
         if p.status!='RUNNING':raise RunPaused()
+        if excluded_package_members(db,p):raise ValueError('В комплекте есть исключённые компании. Создайте новый комплект')
         if hashlib.sha256((folder/'contacts.xlsx').read_bytes()).hexdigest()!=p.selection['contacts_sha256']:raise ValueError('Файл выбранных контактов изменён')
         (folder/'prompt.md').write_text(prompt,encoding='utf-8')
         (folder/'snapshot.json').write_text(json.dumps({'segment':p.segment_snapshot,'sender':p.sender_snapshot,'context':p.context_snapshot,'selection':p.selection,'recipient_type':p.recipient_type,'next_step':p.next_step,'review':p.review},ensure_ascii=False,indent=2),encoding='utf-8')
