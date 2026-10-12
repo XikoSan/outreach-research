@@ -1,5 +1,11 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+RESEARCH_DIRECTIONS = ('website', 'social', 'news_jobs', 'reviews', 'forums')
+
+def selected_directions(config: dict) -> set[str]:
+    """Old saved runs retain their original scope when the setting is absent."""
+    return set(config.get('research_directions', RESEARCH_DIRECTIONS)) | {'website'}
 
 class Strict(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -28,6 +34,13 @@ class SenderProfile(Strict):
     offers: list[Offer] = Field(default_factory=list)
 class RunConfig(Strict):
     methodology_version: Literal['legacy','campaign-v1'] = 'legacy'
+    research_directions: list[Literal['website','social','news_jobs','reviews','forums']] = Field(default_factory=lambda: list(RESEARCH_DIRECTIONS))
+    @field_validator('research_directions')
+    @classmethod
+    def check_research_directions(cls, value):
+        if 'website' not in value or len(value) != len(set(value)):
+            raise ValueError('Сайт обязателен; направления не должны повторяться')
+        return value
     max_targeted_research_queries: int = Field(default=3, ge=0, le=3)
     max_targeted_research_pages: int = Field(default=5, ge=0, le=5)
     max_search_queries: int = Field(default=6, ge=1, le=20)

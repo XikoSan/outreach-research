@@ -5,7 +5,7 @@ from openai import AuthenticationError, PermissionDeniedError, NotFoundError
 from urllib.parse import urlsplit
 from .db import Session, Run, Company, log
 from .llm import Gateway, BudgetPause, RunPaused, UncertainCall, SearchLimit
-from .schemas import Discovery, ResearchReport, Profile, Segments, Review, PromptResult
+from .schemas import Discovery, ResearchReport, Profile, Segments, Review, PromptResult, selected_directions
 from .crawler import fetch
 from .rules import classify, origin, classify_with_trace
 from . import evidence as evidence_v3
@@ -91,9 +91,12 @@ class Pipeline:
             if c.stage=='PROFILE_READY' or c.identity=='NEEDS_REVIEW':return
             config=dict(r.config);config.setdefault('research_as_of',r.created_at[:10]);sender={**research_sender(r),'offers':sender_directions(research_sender(r))};resource=c.resource;name=c.name;context=c.context
         v3=config.get('pipeline_version',1)>=3
+        allowed=selected_directions(config)
+        if acquisition.social(resource) or resource in context.get('socials',[]):allowed.add('social')
         plan=acquisition.prepare(self,company_id,config,sender,fetch) if v3 else None
         if plan and not plan['identity_confirmed']:return
         for direction in DIRECTIONS:
+            if direction not in allowed:continue
             checkpoint(self.id,'RESEARCH')
             with Session() as db:
                 c=db.get(Company,company_id);reports=dict(c.research)
@@ -198,7 +201,7 @@ class Pipeline:
         else:payload={'description':'Публичных данных недостаточно','signals':[],'limitations':['Не получены проверяемые доказательства']}
         with Session() as db:
             c=db.get(Company,company_id)
-            if v3:payload={**payload,'validation_version':evidence_v3.VERSION,'coverage_complete':all(v.get('coverage')=='checked' for v in c.research.values()) and all(d in c.research for d in DIRECTIONS)}
+            if v3:payload={**payload,'validation_version':evidence_v3.VERSION,'coverage_complete':all(c.research.get(d,{}).get('coverage')=='checked' for d in allowed)}
             c.profile=payload;c.stage='PROFILE_READY';c.group='INSUFFICIENT_DATA' if not payload['signals'] else 'NOT_PROCESSED';db.commit()
     def segment(self):
         checkpoint(self.id,'SEGMENTATION')

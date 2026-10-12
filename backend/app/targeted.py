@@ -3,7 +3,7 @@ import hashlib
 import json
 from urllib.parse import urlsplit
 from .db import Session,Run,Company
-from .schemas import Strict,CandidateSource
+from .schemas import Strict,CandidateSource,RESEARCH_DIRECTIONS,selected_directions
 from .campaigns import BasePageResult,validate_answers,criterion_signals,classify_campaign
 from .prompts import GUARD,EXTRACT
 from .evidence import verify_report,normalized_signals
@@ -20,6 +20,8 @@ def perform_targeted(pipeline,requests,candidates,fetch):
     by_id={s['id']:s for s in candidates}
     with Session() as db:
         run=db.get(Run,pipeline.id);config=dict(run.config)
+        allowed=selected_directions(config)
+        directions=[d for d in RESEARCH_DIRECTIONS if d in allowed]
         criteria=run.reports['campaign_plan']['base_criteria']+run.reports['campaign_plan']['plan']['criteria']
         known_criteria={c['id']:c for c in criteria}
         companies={c.id for c in db.query(Company).filter_by(run_id=pipeline.id,identity='CONFIRMED',stage='PROFILE_READY')}
@@ -52,11 +54,12 @@ def perform_targeted(pipeline,requests,candidates,fetch):
             if 'sources' not in state:
                 state['search_started']=True;save()
                 try:
-                    found=pipeline.ask('discovery',GUARD+' Найди публичные первичные источники для конкретного вопроса общей кампании. Ищи подтверждения И опровержения. Не проводи интервью и не ищи личные страницы. Сторонний домен не означает независимого автора.',{'company':name,'resource':resource,'question':task.question,'decision_impact':task.decision_impact,'candidate':candidate,'date':config['research_as_of']},TargetSources,search=True,company_id=cid)
+                    found=pipeline.ask('discovery',GUARD+' Найди публичные первичные источники для конкретного вопроса общей кампании только из allowed_directions. Не ищи отключённые направления. Ищи подтверждения И опровержения. Не проводи интервью и не ищи личные страницы. Сторонний домен не означает независимого автора.',{'company':name,'resource':resource,'question':task.question,'decision_impact':task.decision_impact,'candidate':candidate,'date':config['research_as_of'],'allowed_directions':directions},TargetSources,search=True,company_id=cid)
                 except SearchLimit:
                     state.update(state='COMPLETE',termination_reason='search_limit');save();continue
-                state['sources']=[s.model_dump() for s in found.sources];state['limitations']=found.limitations;save()
+                state['sources']=[s.model_dump() for s in found.sources if s.direction in allowed];state['limitations']=found.limitations;save()
             for source in state['sources']:
+                if source['direction'] not in allowed:continue
                 if page_count>=config.get('max_targeted_research_pages',5):break
                 url=source['url']
                 if url in state['attempted']:continue

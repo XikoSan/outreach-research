@@ -1,7 +1,7 @@
 """Source-first acquisition plan, persisted before direction extraction."""
 from urllib.parse import urlsplit
 from .db import Session, Run, Company
-from .schemas import Discovery
+from .schemas import Discovery, RESEARCH_DIRECTIONS, selected_directions
 from .prompts import DISCOVERY
 from .llm import RunPaused
 from .workbooks import SOCIAL
@@ -15,18 +15,26 @@ def prepare(pipeline,cid,config,sender,fetch):
         c=db.get(Company,cid)
         if c.context.get('acquisition_plan'):return c.context['acquisition_plan']
         name,resource,context=c.name,c.resource,dict(c.context)
+    anchor_social=social(resource) or resource in context.get('socials',[])
+    allowed=selected_directions(config)
+    if anchor_social:allowed.add('social')  # Required identity fallback when no website exists.
+    directions=[d for d in RESEARCH_DIRECTIONS if d in allowed]
     saved=context.get('initial_snapshot');initial=saved;error=None
     if initial is None:
         try:initial=fetch(resource)
         except Exception as exc:error=type(exc).__name__+': '+str(exc)[:200]
         with Session() as db:
             c=db.get(Company,cid);c.context={**c.context,'initial_snapshot':initial,'initial_error':error};db.commit()
-    # One external baseline covers all five directions. Missing results remain explicit.
-    found=pipeline.ask('discovery',DISCOVERY+' Исследуй все пять направлений одним общим внешним проходом. identity_quote — точный фрагмент переданной исходной страницы, подтверждающий идентичность; если страницы нет, оставь пустым и identity_confirmed=false. checked_directions содержит только направления, реально проверенные внешним поиском, а не просто перечисленные в задании.',
-        {'company':name,'resource':resource,'names':context.get('names',[]),'legal_names':context.get('legal_names',[]),'description':context.get('description',''),
-         'direction':'all','directions':['website','social','news_jobs','reviews','forums'],'limit':config['max_external_sources'],
-         'initial_page':initial,'offers':sender['offers'],'source_filters':config.get('source_filters',''),
-         'date':config['research_as_of'],'freshness_days':config['social_forum_days']},Discovery,search=True,company_id=cid)
+    # A supplied, readable website needs no paid discovery when no external area is selected.
+    searched=not (allowed=={'website'} and initial is not None)
+    if searched:
+        found=pipeline.ask('discovery',DISCOVERY+' Исследуй только перечисленные directions одним общим внешним проходом. Не ищи отключённые направления. identity_quote — точный фрагмент переданной исходной страницы, подтверждающий идентичность; если страницы нет, оставь пустым и identity_confirmed=false. checked_directions содержит только реально проверенные направления.',
+            {'company':name,'resource':resource,'names':context.get('names',[]),'legal_names':context.get('legal_names',[]),'description':context.get('description',''),
+             'direction':'all','directions':directions,'limit':config['max_external_sources'],
+             'initial_page':initial,'offers':sender['offers'],'source_filters':config.get('source_filters',''),
+             'date':config['research_as_of'],'freshness_days':config['social_forum_days']},Discovery,search=True,company_id=cid)
+    else:
+        found=Discovery(identity_confirmed=True,identity_reason='Сайт указан в исходной базе',products='',sources=[],checked_directions=[])
     quote=found.identity_quote.strip()
     names=[n.casefold().strip() for n in [*context.get('names',[name]),*context.get('legal_names',[])] if len(n.strip())>=3]
     # A website supplied by the source workbook is an authoritative identity anchor.
@@ -44,13 +52,15 @@ def prepare(pipeline,cid,config,sender,fetch):
         host=urlsplit(initial['url']).hostname
         for link in initial.get('links',[]):
             url=link['url']
-            if social(url):sources['social'].append(url);official_socials.append(url)
+            if social(url) and 'social' in allowed:sources['social'].append(url);official_socials.append(url)
             elif urlsplit(url).hostname==host and any(x in (url+' '+link['label']).lower() for x in ('about','contact','product','service','company','услуг','продукт','компан','контакт')):sources['website'].append(url)
-    for source in context.get('socials',[]):sources['social'].append(source)
-    for source in found.sources:sources[source.direction].append(source.url)
+    if 'social' in allowed:
+        for source in context.get('socials',[]):sources['social'].append(source)
+    for source in found.sources:
+        if source.direction in allowed:sources[source.direction].append(source.url)
     for d in sources:sources[d]=list(dict.fromkeys(sources[d]))
     plan={'discovery':found.model_dump(),'sources':sources,'initial_page':initial,'official_socials':official_socials,
-          'identity_confirmed':confirmed,'external_checked':True,'checked_directions':found.checked_directions,'identity_reason':found.identity_reason if confirmed else 'Не подтверждена идентичность исходного ресурса точным фрагментом','initial_error':error}
+          'identity_confirmed':confirmed,'external_checked':searched,'checked_directions':[d for d in found.checked_directions if d in allowed],'identity_reason':found.identity_reason if confirmed else 'Не подтверждена идентичность исходного ресурса точным фрагментом','initial_error':error}
     with Session() as db:
         c=db.get(Company,cid);c.context={**c.context,'acquisition_plan':plan};c.identity='CONFIRMED' if confirmed else 'NEEDS_REVIEW';c.reason=plan['identity_reason']
         if not confirmed:

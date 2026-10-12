@@ -64,3 +64,23 @@ def test_empty_search_consumes_limit_and_is_not_repeated(client):
     task.question='Другой вопрос о применении этих же продуктов?'
     assert not perform_targeted(pipe,[task],[candidate],None)
     assert len(calls)==2
+
+
+def test_targeted_search_discards_disabled_forum_sources(client):
+    rid,ids,candidate,task=setup(client)
+    with Session() as db:
+        run=db.get(Run,rid);run.config={**run.config,'research_directions':['website']};db.commit()
+    seen=[]
+    class Fake:
+        def ask(self,role,instructions,payload,schema,**kw):
+            assert schema is TargetSources
+            seen.append(payload['allowed_directions'])
+            return TargetSources(sources=[{'url':'https://forum.example/thread','direction':'forums','rationale':'Outside scope'}],limitations=[])
+    def fetch(url):raise AssertionError('A disabled forum must not be fetched')
+    pipe=Pipeline(rid,Fake());pipe.selected_ids=set(ids)
+    assert not perform_targeted(pipe,[task],[candidate],fetch)
+    assert seen==[['website'],['website']]
+    with Session() as db:
+        for cid in ids:
+            states=db.get(Company,cid).context['targeted_tasks']
+            assert next(iter(states.values()))['sources']==[]
