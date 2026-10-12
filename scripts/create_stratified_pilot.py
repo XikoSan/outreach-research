@@ -71,6 +71,15 @@ def frozen_plan_for_source(plan, source):
     return deepcopy(plan)
 
 
+def pilot_config(source_config, offer_config, as_of):
+    """Keep the database's acquisition filters, not a former offer pilot's size."""
+    return {**offer_config, 'source_filters': source_config.get('source_filters', ''),
+            'pipeline_version': 3, 'methodology_version': 'campaign-v1',
+            'research_directions': ['website'], 'max_companies': None,
+            'max_website_pages': 2, 'max_retries': 1, 'concurrency': 3,
+            'research_as_of': as_of}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source_run_id')
@@ -150,12 +159,8 @@ def main():
         subset.save(path)
         subset.close()
         content = path.read_bytes()
-        config = {**offer.config, 'pipeline_version': 3,
-                  'methodology_version': 'campaign-v1',
-                  'research_directions': ['website'], 'max_companies': None,
-                  'max_website_pages': 2, 'max_retries': 1,
-                  'concurrency': 3,
-                  'research_as_of': datetime.now(timezone.utc).date().isoformat()}
+        config = pilot_config(source.config, offer.config,
+                              datetime.now(timezone.utc).date().isoformat())
         pilot = Run(id=run_id, name=f'Стратифицированный пилот · {args.size} компаний',
                     filename='stratified-pilot.xlsx', source_path=str(path.resolve()),
                     source_hash=sha256(content).hexdigest(),

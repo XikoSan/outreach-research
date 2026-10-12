@@ -480,6 +480,7 @@ def research_base(pipeline,cid,fetch,*,batch_pages=False):
 from .schemas import Segment, Segments
 
 class CampaignSegment(Segment):
+    required_signals: list[str] = Field(default_factory=list)
     basis_type: Literal['applicability','hypothesis','event']
     cooperation_proposal: str = Field(min_length=10)
     next_step: str = Field(min_length=3)
@@ -498,12 +499,12 @@ class CampaignSegments(Segments):
     research_requests: list[TargetedQuestion] = Field(default_factory=list,max_length=12)
 
 CAMPAIGN_PROMPT=GUARD+'''
-В required_signals, supporting_signals и contradicting_signals записывай ТОЛЬКО точные значения поля name из profiles.examples.signals. Не пиши объяснения, метки, названия компаний, confidence, evidence_ids или предложения внутри этих списков. Новые базовые критерии дают только конкретные признаки criterion_<id>__<hash> с различающими значениями в label; общий criterion_<id> не подтверждает общность ситуации. Если у компаний разные названия близких фактов, предложи сближение лишь как кандидата для последующей проверки, не подменяй реальные имена признаков общим. Найди повторяющиеся ситуации по всей переданной выборке и предложи общие кампании, не отдельное предложение каждой компании. Минимум две компании на сегмент. Один сегмент — одна услуга, общая аргументация и следующий шаг; одинаковые стратегии объединяй. Используй base_research и подтверждённые сигналы.
+В required_signals, supporting_signals и contradicting_signals записывай ТОЛЬКО существующие точные имена признаков: для input_kind=feature_patterns из profiles.examples.signals, для input_kind=candidate_overview точные имена из candidate_overview.candidates[].raw_signal_names. В candidate_overview есть exact candidates и rule_candidates; предложи не более одной общей кампании на кандидата и не более трёх всего. Для exact candidate required_signals должны включать оба raw_signal_names ОДНОГО кандидата. Для rule_candidate используй id самого правила как id сегмента, basis_type=applicability, required_signals=[], supporting_signals=[], contradicting_signals=[]: членство затем проверяется по отдельным raw-признакам каждого участника. Не смешивай факты разных кандидатов. Правило dealer_channel + any_specific_product означает только публичное упоминание дилеров и конкретного товара; оно не доказывает наличие работающей дилерской сети у всех, её недостаток или потребность в услуге. Учти shared_observation и claim_limit самого правила. Показатели two_verified_facts_company_count и distinct_citation_company_count описывают только предварительную опору фактами, а не готовый сегмент. independent_source_company_count нужен для более сильной гипотезы, но не доказывает её сам по себе. Не пиши объяснения, метки, названия компаний, confidence, evidence_ids или предложения внутри этих списков. Новые базовые критерии дают только конкретные признаки criterion_<id>__<hash> с различающими значениями в label; общий criterion_<id> не подтверждает общность ситуации. Если у компаний разные названия близких фактов, предложи сближение лишь как кандидата для последующей проверки, не подменяй реальные имена признаков общим. Найди повторяющиеся ситуации по всей переданной выборке и предложи общие кампании, не отдельное предложение каждой компании. Минимум две компании на сегмент. Один сегмент — одна услуга, общая аргументация и следующий шаг; одинаковые стратегии объединяй. name, definition, cooperation_proposal, next_step и shared_message должны быть понятны пользователю без внутренних терминов вроде candidate_id, raw signal, evidence review или названий этапов приложения. Используй base_research при переданных profiles; при candidate_overview используй только его типизированные факты и затем оставь проверку первичных доказательств review и классификатору.
 applicability: минимум два содержательных признака уместности услуги; допускается один официальный источник. Нельзя заявлять проблему или потребность. hypothesis: минимум два независимых сигнала и осторожная гипотеза. event: те же требования плюс датированный актуальный event_signals. Required только HIGH, supporting HIGH/MEDIUM. LOW не используй. Не придумывай услуги, признаки или доказательства. Отрасль сама по себе не сегмент. cooperation_proposal, shared_message и next_step общие для группы. Гипотеза применимости объясняет уместность сотрудничества, а не диагноз. Если оснований нет, объясни abstention_reason и missing_data, доступные в публичных источниках.
 '''
-CAMPAIGN_PROMPT+=' Если конкретный пробел мешает проверить ОБЩЕГО кандидата, добавь research_requests: существующий candidate_id, минимум две company_ids из примеров выборки, criterion_id из base_research.answers, конкретный вопрос проверки или опровержения и влияние ответа на решение. Не создавай запрос без кандидата, личный оффер или общее задание исследовать глубже. Запрос необязателен; если данных достаточно, оставь пусто.'
+CAMPAIGN_PROMPT+=' Если конкретный пробел мешает проверить ОБЩЕГО кандидата, добавь research_requests: существующий candidate_id, минимум две company_ids из примеров выборки, criterion_id из base_research.answers либо candidate_overview.candidates[].facts, конкретный вопрос проверки или опровержения и влияние ответа на решение. Не создавай запрос без кандидата, личный оффер или общее задание исследовать глубже. Запрос необязателен; если данных достаточно, оставь пусто.'
 CAMPAIGN_REVIEW=GUARD+'''
-Проверь общую кампанию по basis_type: applicability требует двух содержательных проверенных признаков применимости, но не независимых источников; hypothesis и event требуют независимых оснований. Для event нужен подтверждённый актуальный датированный признак. Required HIGH; LOW запрещён для назначения. Проверь соответствие реальной услуге, общность предложения, аргументации и следующего шага, отсутствие диагноза в applicability, опровержения и различие с other_segments. Не требуй доказать внутреннюю потребность. passed только если существенных ошибок нет.
+Проверь общую кампанию по basis_type. Для member_bindings проверь отдельно raw channel и product каждого показанного участника и ограничение claim_limit: applicability требует двух содержательных проверенных признаков применимости, но не независимых источников; hypothesis и event требуют независимых оснований. Для event нужен подтверждённый актуальный датированный признак. Required HIGH; LOW запрещён для назначения. Проверь соответствие реальной услуге, общность предложения, аргументации и следующего шага, отсутствие диагноза в applicability, опровержения и различие с other_segments. Не требуй доказать внутреннюю потребность. passed только если существенных ошибок нет.
 '''
 
 def classify_campaign(profile,evidence,segments):
@@ -513,11 +514,32 @@ def classify_campaign(profile,evidence,segments):
     ev={e['id']:e for e in evidence if e.get('validation_version')==EV_VERSION and e.get('subject_verified') and e.get('current') and e.get('scope') in ('company','product')}
     accepted=[];traces=[]
     for seg in segments:
-        if seg['basis_type']=='applicability':
+        if seg.get('member_bindings'):
+            mapped=seg['member_bindings'].get(profile.get('company_id'))
+            reasons=[];matches=[]
+            if seg['basis_type']!='applicability':reasons.append('rule_requires_applicability')
+            if not mapped:reasons.append('not_in_verified_candidate')
+            else:
+                for facet in ('channel','product'):
+                    entry=mapped.get(facet,{})
+                    allowed=set(entry.get('evidence_ids',[]))
+                    found=next((signals[name] for name in entry.get('raw_signal_names',[])
+                                if name in signals and signals[name]['state']=='confirmed'
+                                and signals[name]['confidence']=='HIGH'
+                                and any(eid in allowed and eid in ev for eid in signals[name]['evidence_ids'])),None)
+                    if found:matches.append(found)
+                    else:reasons.append(f'{facet}_not_verified')
+            if len({item['name'] for item in matches})<2:reasons.append('insufficient_distinct_facts')
+            if any(signals.get(name,{}).get('state')=='confirmed'
+                   and signals[name]['confidence'] in ('HIGH','MEDIUM')
+                   for name in seg['contradicting_signals']):reasons.append('contradiction')
+            trace={'segment_id':seg['id'],'accepted':not reasons,'reasons':reasons,
+                   'matched_signals':[item['name'] for item in matches]}
+        elif seg['basis_type']=='applicability':
             required=seg['required_signals'];reasons=[]
             matches=[s for n,s in signals.items() if n in required+seg['supporting_signals'] and s['state']=='confirmed' and s['confidence'] in ('HIGH','MEDIUM') and any(i in ev for i in s['evidence_ids'])]
             if not required or any(n not in signals or signals[n]['state']!='confirmed' or signals[n]['confidence']!='HIGH' or not any(i in ev for i in signals[n]['evidence_ids']) for n in required):reasons.append('required_not_verified')
-            if len(matches)<2 or len({i for s in matches for i in s['evidence_ids'] if i in ev})<2:reasons.append('insufficient_distinct_facts')
+            if len({s['name'] for s in matches})<2:reasons.append('insufficient_distinct_facts')
             if any(signals.get(n,{}).get('state')=='confirmed' and signals[n]['confidence'] in ('HIGH','MEDIUM') for n in seg['contradicting_signals']):reasons.append('contradiction')
             trace={'segment_id':seg['id'],'accepted':not reasons,'reasons':reasons,'matched_signals':[s['name'] for s in matches]}
         else:

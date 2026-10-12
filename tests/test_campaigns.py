@@ -155,7 +155,11 @@ def test_campaign_pipeline_shared_segment_and_early_stop(client,monkeypatch):
                 return BasePageResult(report={'summary':'Products','evidence':evidence,'signals':signals,'contradictions':[],'limitations':[]},answers=[{'criterion_id':c['id'],'status':'confirmed','answer':facts[c['id']][0],'evidence_ids':facts[c['id']][1], 'facts':[{'value':facts[c['id']][0],'evidence_ids':facts[c['id']][1]}]} for c in payload['criteria']])
             if schema is CampaignSegments:
                 self.segment_calls+=1
-                return CampaignSegments(segments=[{'id':'candidate','name':'Technical products','definition':'Shared situation','offer_id':'research','hypothesis':'Research may be relevant','confidence':'MEDIUM','required_signals':['technical_products'],'supporting_signals':['multiple_applications'],'contradicting_signals':[],'outreach_angle':'Shared research proposal','diagnostic_question':'Relevant?','allowed_claims':[],'forbidden_claims':['Your sales are falling'],'basis_type':'applicability','cooperation_proposal':'Research buyer selection criteria','next_step':'Discuss research scope','shared_message':'We offer buyer criteria research','event_signals':[]}])
+                assert payload['input_kind']=='candidate_overview'
+                shared=payload['candidate_overview']['candidates'][0]['raw_signal_names']
+                assert len(shared)==2
+                proposal={'id':'candidate','name':'Technical products','definition':'Shared situation','offer_id':'research','hypothesis':'Research may be relevant','confidence':'MEDIUM','required_signals':shared,'supporting_signals':[],'contradicting_signals':[],'outreach_angle':'Shared research proposal','diagnostic_question':'Relevant?','allowed_claims':[],'forbidden_claims':['Your sales are falling'],'basis_type':'applicability','cooperation_proposal':'Research buyer selection criteria','next_step':'Discuss research scope','shared_message':'We offer buyer criteria research','event_signals':[]}
+                return CampaignSegments(segments=[proposal,{**proposal,'id':'duplicate'}])
             if schema is Review:return Review(passed=True,issues=[])
             raise AssertionError(schema)
     gateway=Fake()
@@ -165,6 +169,7 @@ def test_campaign_pipeline_shared_segment_and_early_stop(client,monkeypatch):
     with Session() as db:
         r=db.get(Run,rid);assert r.status=='COMPLETED'
         assert len(r.segments)==1
+        assert r.reports['segmentation']['generation_notes'][0]['rejected_unanchored']==1
         assert {c.group for c in db.query(Company).filter_by(run_id=rid)}=={'segment_001'}
         assert all(c.profile['base_research']['answers'] for c in db.query(Company).filter_by(run_id=rid))
         from app.campaigns import classify_campaign
@@ -548,3 +553,139 @@ def test_two_page_batch_keeps_page_provenance_and_rejects_misattributed_quote(cl
         assert answers['application_scenarios']['status'] == 'confirmed'
         assert answers['product_buyer_use_link']['status'] == 'confirmed'
         assert 'buyer_types' in base['citation_losses']
+
+
+def test_applicability_accepts_two_distinct_facts_in_one_verified_quote():
+    from app.campaigns import classify_campaign
+    from app.evidence import VERSION as EVIDENCE_VERSION
+    evidence=[{'id':'quote','validation_version':EVIDENCE_VERSION,'subject_verified':True,
+               'current':True,'scope':'company','quote':'We make parts for hospitals.',
+               'original_source_id':'company:one'}]
+    profile={'signals':[{'name':'makes_parts','state':'confirmed','confidence':'HIGH',
+                         'evidence_ids':['quote'],'explanation':'Product'},
+                        {'name':'hospitals','state':'confirmed','confidence':'HIGH',
+                         'evidence_ids':['quote'],'explanation':'Buyer'}]}
+    segment={'id':'s','basis_type':'applicability','required_signals':['makes_parts','hospitals'],
+             'supporting_signals':[],'contradicting_signals':[]}
+    assert classify_campaign(profile,evidence,[segment])[0]=='s'
+    profile['signals'][1]['evidence_ids']=[]
+    assert classify_campaign(profile,evidence,[segment])[0]!='s'
+
+
+def test_campaign_v2_abstains_without_shared_facts_and_spends_nothing(client):
+    from app.db import Company
+    from app.pipeline import Pipeline
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1',
+                    'research_as_of':'2026-10-10'}
+        run.context_snapshot={'summary':SOURCE,'name':'Research'}
+        run.reports={**run.reports,'campaign_plan':{
+            'version':'campaign-v2','plan':plan().model_dump(),
+            'base_criteria':BASE_CRITERIA}}
+        for company in db.query(Company).filter_by(run_id=rid):
+            company.identity='CONFIRMED';company.stage='PROFILE_READY'
+            company.profile={'signals':[]}
+        db.commit()
+    class NoCalls:
+        def ask(self,*args,**kwargs):
+            raise AssertionError('No shared facts must incur no model cost')
+    Pipeline(rid,NoCalls()).segment(saved_evidence_only=True)
+    with Session() as db:
+        report=db.get(Run,rid).reports['segmentation']
+        assert report['diagnostics']['candidate_count']==0
+        assert report['diagnostics']['model_batches']==0
+        assert report['candidate_discovery']['summary']['candidate_count']==0
+
+
+def test_compact_review_keeps_rule_citations_and_drops_unrelated_research():
+    from app.pipeline import compact_segment_review_profile
+    profile={'company_id':'company','description':'Example','research_as_of':'2026-10-10',
+             'signals':[{'name':'relevant','state':'confirmed','confidence':'HIGH',
+                         'evidence_ids':['source'],'explanation':'Relevant'},
+                        {'name':'unrelated','state':'confirmed','confidence':'HIGH',
+                         'evidence_ids':['other'],'explanation':'Other'}],
+             'evidence':[{'id':'source','url':'https://example.test','quote':'A'*5000,
+                          'scope':'company','subject_verified':True,'current':True},
+                         {'id':'other','url':'https://example.test/other','quote':'B'*5000}],
+             'base_research':{'large':'C'*50000}}
+    segment={'required_signals':['relevant'],'supporting_signals':[],
+             'contradicting_signals':[],'event_signals':[]}
+    compact=compact_segment_review_profile(profile,segment)
+    assert len(compact['signals'])==1
+    assert [item['id'] for item in compact['evidence']]==['source']
+    assert compact['evidence'][0]['quote_truncated'] is True
+    assert 'base_research' not in compact
+
+
+def test_campaign_rule_candidate_checks_each_company_raw_evidence(client,monkeypatch):
+    from app.campaigns import CampaignSegments,criterion_signals
+    from app.db import Company
+    from app.evidence import VERSION as EVIDENCE_VERSION
+    from app.pipeline import Pipeline
+    from app.schemas import Review
+    rid=new_run(client)
+    with Session() as db:
+        run=db.get(Run,rid)
+        run.config={**run.config,'pipeline_version':3,'methodology_version':'campaign-v1',
+                    'research_as_of':'2026-10-10'}
+        run.context_snapshot={'summary':SOURCE,'name':'Research'}
+        run.reports={**run.reports,'campaign_plan':{
+            'version':'campaign-v2','plan':plan().model_dump(),
+            'base_criteria':BASE_CRITERIA}}
+        companies=db.query(Company).filter_by(run_id=rid).order_by(Company.id).all()
+        for company,product,channel in zip(companies,('Септики','Компрессоры'),('дилерам','дилеров')):
+            evidence=[{'id':'product-'+company.id,'validation_version':EVIDENCE_VERSION,
+                       'subject_verified':True,'current':True,'scope':'company',
+                       'quote':'Компания производит '+product,'url':company.resource},
+                      {'id':'channel-'+company.id,'validation_version':EVIDENCE_VERSION,
+                       'subject_verified':True,'current':True,'scope':'company',
+                       'quote':'В публичных материалах упомянуты '+channel,
+                       'url':company.resource}]
+            answers=[{'criterion_id':criterion,'status':'confirmed','value_specific':True,
+                      'facts':[{'value':value,'evidence_ids':[eid]}]}
+                     for criterion,value,eid in (
+                         ('products',product,evidence[0]['id']),
+                         ('buyer_types',channel,evidence[1]['id']))]
+            company.identity='CONFIRMED';company.stage='PROFILE_READY'
+            company.profile={'signals':criterion_signals(answers,evidence)}
+            company.research={'base':{'evidence':evidence}}
+        db.commit()
+    def no_fetch(*args,**kwargs):
+        raise AssertionError('Saved-evidence replay must not fetch pages')
+    monkeypatch.setattr('app.pipeline.fetch',no_fetch)
+    class Fake:
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            assert role=='segmentation'
+            if schema is CampaignSegments:
+                rule=payload['candidate_overview']['rule_candidates'][0]
+                assert rule['company_count']==2
+                return CampaignSegments(segments=[{
+                    'id':rule['id'],'name':'Дилерский канал','definition':'Упомянуты дилеры и товары',
+                    'offer_id':'research','hypothesis':'Проверить применимость услуги',
+                    'confidence':'MEDIUM','required_signals':[],'supporting_signals':[],
+                    'contradicting_signals':[],'outreach_angle':'Общее предложение',
+                    'diagnostic_question':'Актуально ли обсудить?',
+                    'allowed_claims':[],'forbidden_claims':['Дилеров не хватает'],
+                    'basis_type':'applicability','cooperation_proposal':'Изучение дилерского канала',
+                    'next_step':'Обсудить задачу','shared_message':'Предложение изучить дилерский канал',
+                    'event_signals':[]}])
+            assert schema is Review
+            assert len(payload['profiles'])==2
+            assert all(len(profile['signals'])>=2 for profile in payload['profiles'])
+            return Review(passed=True,issues=[])
+    Pipeline(rid,Fake()).finish(saved_evidence_only=True)
+    with Session() as db:
+        run=db.get(Run,rid)
+        assert len(run.segments)==1
+        assert len(run.segments[0]['member_bindings'])==2
+        assert {company.group for company in db.query(Company).filter_by(run_id=rid)}=={'segment_001'}
+        from app.campaigns import classify_campaign
+        from app.pipeline import evidence_for
+        company=db.query(Company).filter_by(run_id=rid).first()
+        assert classify_campaign({**company.profile,'company_id':'foreign'},evidence_for(company),run.segments)[0]!='segment_001'
+        weakened={**company.profile,'company_id':company.id,
+                  'signals':[signal for signal in company.profile['signals']
+                             if not signal['name'].startswith('criterion_buyer_types__')]}
+        assert classify_campaign(weakened,evidence_for(company),run.segments)[0]!='segment_001'

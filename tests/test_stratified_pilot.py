@@ -48,3 +48,17 @@ def test_frozen_plan_requires_exact_same_offer_document():
     assert frozen_plan_for_source(plan, source) == plan
     with pytest.raises(ValueError):
         frozen_plan_for_source(plan, source + ' Иное предложение.')
+
+
+def test_pilot_uses_source_database_filters_instead_of_offer_pilot_size():
+    from scripts.create_stratified_pilot import pilot_config
+
+    source = {'source_filters': 'Промышленность, производство'}
+    offer = {'source_filters': 'Пилот новой методологии: исходная выборка 25 компаний',
+             'models': {'segmentation': 'gpt-6.1-sol'}}
+    config = pilot_config(source, offer, '2026-10-12')
+    assert config['source_filters'] == source['source_filters']
+    assert config['models'] == offer['models']
+    assert config['max_companies'] is None
+    assert offer['source_filters'].endswith('25 компаний')
+    assert pilot_config({}, offer, '2026-10-12')['source_filters'] == ''

@@ -43,6 +43,30 @@ def checkpoint(run_id,stage):
 def evidence_for(company):
     return [e for report in company.research.values() for e in report.get('evidence',[])]
 
+
+def compact_segment_review_profile(profile, segment):
+    """Keep the proposed rule and its original citations, not the full research file."""
+    names=set(segment['required_signals']+segment['supporting_signals']+
+              segment['contradicting_signals']+segment.get('event_signals',[]))
+    mapped=segment.get('member_bindings',{}).get(profile['company_id'],{})
+    for facet in ('channel','product'):
+        names.update(mapped.get(facet,{}).get('raw_signal_names',[])[:3])
+    signals=[signal for signal in profile.get('signals',[]) if signal['name'] in names]
+    ids={eid for signal in signals for eid in signal.get('evidence_ids',[])}
+    evidence=[{
+        'id': item['id'], 'url': item.get('url',''),
+        'quote_excerpt': item.get('quote','')[:4000],
+        'quote_truncated': len(item.get('quote',''))>4000,
+        'published_at': item.get('published_at'),
+        'scope': item.get('scope'), 'subject_verified': item.get('subject_verified'),
+        'current': item.get('current'), 'source_relation': item.get('source_relation'),
+        'original_source_id': item.get('original_source_id'),
+    } for item in profile.get('evidence',[]) if item['id'] in ids]
+    return {'company_id':profile['company_id'], 'description':profile.get('description','')[:500],
+            'research_as_of':profile.get('research_as_of'), 'signals':signals,
+            'evidence':evidence, 'contradictions':profile.get('contradictions',[])[:10],
+            'limitations':profile.get('limitations',[])[:10]}
+
 def verify_report(report,pages,direction,days):
     by_url={p['url']:p for p in pages}
     accepted=[];mapping={};issues=[]
@@ -203,7 +227,7 @@ class Pipeline:
             c=db.get(Company,company_id)
             if v3:payload={**payload,'validation_version':evidence_v3.VERSION,'coverage_complete':all(c.research.get(d,{}).get('coverage')=='checked' for d in allowed)}
             c.profile=payload;c.stage='PROFILE_READY';c.group='INSUFFICIENT_DATA' if not payload['signals'] else 'NOT_PROCESSED';db.commit()
-    def segment(self):
+    def segment(self, *, saved_evidence_only=False):
         checkpoint(self.id,'SEGMENTATION')
         with Session() as db:
             r=db.get(Run,self.id)
@@ -224,20 +248,71 @@ class Pipeline:
         if v3:
             for p in profiles:p['signals']=evidence_v3.normalized_signals(p['signals'])
         candidates=[];generation_notes=[];targeted_requests=[]
-        # Bounded discovery batches. A final merge considers candidate definitions globally.
-        batches=[];batch=[];size=0
-        strategy_profiles=evidence_v3.feature_patterns(profiles) if v3 else profiles
-        for p in strategy_profiles:
-            length=len(json.dumps(p,ensure_ascii=False).encode())
-            if size+length>70_000 and batch:batches.append(batch);batch=[];size=0
-            batch.append(p);size+=length
-        if batch:batches.append(batch)
-        for batch in batches if sender['offers'] else []:
-            result=self.ask('segmentation',segment_prompt,{'profiles':batch,'input_kind':'feature_patterns' if v3 else 'profiles','offers':sender['offers'],'source_filters':source_filters},segment_schema,max_output=max_tokens)
-            candidates.extend(x.model_dump() for x in result.segments)
-            if campaign_mode:targeted_requests.extend(result.research_requests)
-            generation_notes.append({'abstention_reason':result.abstention_reason,'missing_data':result.missing_data,'candidate_count':len(result.segments)})
-        if campaign_mode and targeted_requests:
+        # The v2 campaign plan needs a global, evidence-backed candidate search.
+        # Exact shared facts are found before any model context is divided.
+        candidate_overview=None
+        batches=[]
+        if campaign_mode and r.reports['campaign_plan'].get('version')=='campaign-v2':
+            from .candidate_discovery import build_candidate_overview
+            candidate_overview=build_candidate_overview(profiles)
+            compact=candidate_overview['model_overview']
+            viable=[item for item in compact['candidates'] if item['two_verified_facts_company_count']>=2][:12]
+            viable_rules=compact.get('rule_candidates',[])[:12]
+            if (viable or viable_rules) and sender['offers']:
+                model_input={**compact,
+                             'candidates':[{**item,'company_ids':item['company_ids'][:10]} for item in viable],
+                             'rule_candidates':[{**item,'company_ids':item['company_ids'][:10]} for item in viable_rules]}
+                batches=[viable+viable_rules]
+                result=self.ask('segmentation',segment_prompt,
+                                {'candidate_overview':model_input,'input_kind':'candidate_overview',
+                                 'offers':sender['offers'],'source_filters':source_filters},
+                                segment_schema,max_output=min(max_tokens,6000))
+                allowed_pairs=[set(item['raw_signal_names']) for item in viable]
+                rule_by_id={item['id']:item for item in viable_rules}
+                rule_ids=set(rule_by_id)
+                used_pairs=set();used_rules=set()
+                for proposed in result.segments:
+                    value=proposed.model_dump()
+                    if len(candidates)>=3:break
+                    if (value['id'] in rule_ids and value['id'] not in used_rules
+                            and value['basis_type']=='applicability'
+                            and not any(value[field] for field in ('required_signals',
+                                     'supporting_signals','contradicting_signals','event_signals'))):
+                        bindings=candidate_overview['bindings']['rule_candidates'][value['id']]
+                        value['member_bindings']=bindings
+                        value['candidate_rule']={key:rule_by_id[value['id']].get(key) for key in ('kind','shared_observation','claim_limit','required_criteria')}
+                        used_rules.add(value['id'])
+                        candidates.append(value)
+                        continue
+                    # An exact-fact campaign must be anchored in a shared pair.
+                    anchor=next((index for index,pair in enumerate(allowed_pairs)
+                                 if pair<=set(value['required_signals']) and index not in used_pairs),None)
+                    if anchor is not None:
+                        used_pairs.add(anchor)
+                        candidates.append(value)
+                targeted_requests.extend(result.research_requests)
+                generation_notes.append({'abstention_reason':result.abstention_reason,
+                                         'missing_data':result.missing_data,
+                                         'candidate_count':len(candidates),
+                                         'rejected_unanchored':len(result.segments)-len(candidates)})
+            else:
+                generation_notes.append({'abstention_reason':'Нет общей пары с двумя разными подтверждёнными доказательствами у каждой компании' if sender['offers'] else 'Не описаны услуги отправителя',
+                                         'missing_data':[],'candidate_count':0})
+        else:
+            # Legacy runs retain the earlier pattern workflow and cached prompts.
+            batch=[];size=0
+            strategy_profiles=evidence_v3.feature_patterns(profiles) if v3 else profiles
+            for p in strategy_profiles:
+                length=len(json.dumps(p,ensure_ascii=False).encode())
+                if size+length>70_000 and batch:batches.append(batch);batch=[];size=0
+                batch.append(p);size+=length
+            if batch:batches.append(batch)
+            for batch in batches if sender['offers'] else []:
+                result=self.ask('segmentation',segment_prompt,{'profiles':batch,'input_kind':'feature_patterns' if v3 else 'profiles','offers':sender['offers'],'source_filters':source_filters},segment_schema,max_output=max_tokens)
+                candidates.extend(x.model_dump() for x in result.segments)
+                if campaign_mode:targeted_requests.extend(result.research_requests)
+                generation_notes.append({'abstention_reason':result.abstention_reason,'missing_data':result.missing_data,'candidate_count':len(result.segments)})
+        if campaign_mode and targeted_requests and not saved_evidence_only:
             from .targeted import perform_targeted
             if perform_targeted(self,targeted_requests,candidates,fetch):
                 with Session() as db:
@@ -252,7 +327,7 @@ class Pipeline:
             for start in range(0,len(candidates),12):
                 result=self.ask('segmentation',segment_prompt+' Объедини кандидатов со сходной гипотезой; не добавляй новые имена признаков.',{'candidates':merged+candidates[start:start+12],'offers':sender['offers']},segment_schema,max_output=max_tokens)
                 if result.segments:merged=[s.model_dump() for s in result.segments]
-        if campaign_mode and merged:
+        if campaign_mode and merged and not saved_evidence_only:
             from .campaigns import repair_citation_losses
             needed={name.removeprefix('criterion_').split('__',1)[0] for candidate in merged for name in candidate['required_signals']+candidate['supporting_signals'] if name.startswith('criterion_')}
             repaired=False
@@ -276,15 +351,23 @@ class Pipeline:
                     (positive if group==seg['id'] else negative).append(p)
                 if len(positive)<(2 if campaign_mode else 1):continue
                 examples=positive[:3]+negative[:2]
-            review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':seg,'profiles':examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
+            review_examples=[compact_segment_review_profile(profile,seg) for profile in examples]
+            review_segment={**seg,'member_bindings':{p['company_id']:seg['member_bindings'][p['company_id']] for p in examples if p['company_id'] in seg.get('member_bindings',{})}} if seg.get('member_bindings') else seg
+            review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':review_segment,'profiles':review_examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
             reviews.append({'segment':seg,'review':review.model_dump(),'evaluations':evaluations})
             if review.passed:
-                signal_labels={s['name']:s['label'] for p in profiles for s in p['signals'] if s.get('label')}
+                relevant=set(seg['required_signals']+seg['supporting_signals']+
+                             seg['contradicting_signals']+seg.get('event_signals',[]))
+                for mapped in seg.get('member_bindings',{}).values():
+                    for facet in ('channel','product'):
+                        relevant.update(mapped.get(facet,{}).get('raw_signal_names',[]))
+                signal_labels={s['name']:s['label'] for p in profiles for s in p['signals']
+                               if s['name'] in relevant and s.get('label')}
                 valid.append({**seg,'id':f'segment_{len(valid)+1:03d}','signal_labels':signal_labels})
         with Session() as db:
-            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;r.reports={**r.reports,'segmentation':{'candidates':candidates,'generation_notes':generation_notes,'targeted_requests':[q.model_dump() for q in targeted_requests],'reviews':reviews,'feature_matrix':matrix,'diagnostics':{'selected_companies':len(companies),'profiles_with_signals':len(profiles),'activity_directions':len(sender['offers']),'candidate_count':len(candidates),'rejected_invalid_signal_names':sum(not set(x['required_signals']+x['supporting_signals']+x['contradicting_signals'])<=known_signals for x in merged),'valid_segments':len(valid),'reason':('missing_activity_context' if not sender['offers'] else 'no_profiles_with_signals' if not profiles else 'no_candidates' if not candidates else 'no_valid_segments' if not valid else 'completed')},'created_at':datetime.now(timezone.utc).isoformat()}};log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
-    def finish(self):
-        self.segment();checkpoint(self.id,'CLASSIFICATION')
+            r=db.get(Run,self.id);r.segments=valid;r.segmentation_version=1;r.reports={**r.reports,'segmentation':{'candidates':candidates,'generation_notes':generation_notes,'candidate_discovery':({'version':candidate_overview['version'],'summary':candidate_overview['summary'],'candidates':candidate_overview['candidates'],'rule_candidates':candidate_overview.get('rule_candidates',[])} if candidate_overview else None),'targeted_requests':[q.model_dump() for q in targeted_requests],'reviews':reviews,'feature_matrix':matrix,'diagnostics':{'selected_companies':len(companies),'profiles_with_signals':len(profiles),'activity_directions':len(sender['offers']),'model_batches':len(batches),'discovery_candidates_sent':len(batches[0]) if candidate_overview and batches else 0,'candidate_count':len(candidates),'rejected_invalid_signal_names':sum(not set(x['required_signals']+x['supporting_signals']+x['contradicting_signals'])<=known_signals for x in merged),'valid_segments':len(valid),'reason':('missing_activity_context' if not sender['offers'] else 'no_profiles_with_signals' if not profiles else 'no_candidates' if not candidates else 'no_valid_segments' if not valid else 'completed')},'created_at':datetime.now(timezone.utc).isoformat()}};log(db,self.id,'SEGMENTATION','Правила сегментов зафиксированы',metrics={'segments':len(valid)});db.commit()
+    def finish(self, *, saved_evidence_only=False):
+        self.segment(saved_evidence_only=saved_evidence_only);checkpoint(self.id,'CLASSIFICATION')
         with Session() as db:
             r=db.get(Run,self.id)
             query=db.query(Company).filter_by(run_id=self.id,stage='PROFILE_READY',identity='CONFIRMED')
@@ -295,7 +378,7 @@ class Pipeline:
                     if r.config.get('methodology_version')=='campaign-v1':
                         from .campaigns import classify_campaign
                         classifier=classify_campaign
-                    c.group,c.reason,trace=classifier(c.profile,evidence_for(c),r.segments)
+                    c.group,c.reason,trace=classifier({**c.profile,'company_id':c.id},evidence_for(c),r.segments)
                     c.profile={**c.profile,'classification':{'segment_version':r.segmentation_version,'trace':trace}}
                 else:c.group,c.reason=classify(c.profile,evidence_for(c),r.segments)
             db.commit()
