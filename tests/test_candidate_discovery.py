@@ -234,3 +234,16 @@ def test_diversity_does_not_spend_slots_on_identical_audiences():
     selected=diverse_candidates(candidates,limit=2)
     assert [c['id'] for c in selected]==['0','different']
     assert len(candidates)==31
+
+
+def test_observed_audience_candidates_are_data_driven_and_preserve_distinct_products():
+    rows=[]
+    for cid,buyer,product in [('a','монтажные организации','Тепловые насосы'),('b','монтажные организации','Электрощиты'),('c','юридические лица','Кессоны'),('d','юридические лица','Трубы')]:
+        rows.append(profile(cid,[fact('buyer_types',buyer,cid+'b'),fact('products',product,cid+'p')],[evidence(cid+'b'),evidence(cid+'p')]))
+    result=build_candidate_overview(rows)
+    rules=[r for r in result['rule_candidates'] if r['id'].startswith('rule_observed_')]
+    assert len(rules)==1 and rules[0]['company_ids']==['a','b']
+    binding=result['bindings']['rule_candidates'][rules[0]['id']]
+    assert binding['a']['product']['raw_signal_names']!=binding['b']['product']['raw_signal_names']
+    rows[1]['evidence'][0]['current']=False
+    assert not [r for r in build_candidate_overview(rows)['rule_candidates'] if r['id'].startswith('rule_observed_')]

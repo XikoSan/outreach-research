@@ -14,7 +14,9 @@ def compare(rid):
         profiles=[dict(company_id=c.id,signals=normalized_signals(c.profile.get('signals',[])),evidence=evidence_for(c)) for c in companies if c.profile.get('signals')]
         overview=build_candidate_overview(profiles)
         old=r.reports['segmentation']['candidate_discovery']
-        old_selected=old['candidates'][:12]+old.get('rule_candidates',[])[:12]
+        sent_ids={cid for note in r.reports['segmentation'].get('generation_notes',[]) for cid in note.get('sent_candidate_ids',[])}
+        old_selected=([c for c in old['candidates']+old.get('rule_candidates',[]) if c['id'] in sent_ids]
+                      if sent_ids else old['candidates'][:12]+old.get('rule_candidates',[])[:12])
         current=overview['model_overview']
         selected=diverse_candidates(current['candidates'])+diverse_candidates(current['rule_candidates'])
         members=lambda entries:{cid for candidate in entries for cid in candidate['company_ids']}

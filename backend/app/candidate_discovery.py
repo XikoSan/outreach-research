@@ -231,7 +231,31 @@ def _matches_situation(fact, situation):
         return False
     if re.search(r"\b(?:не|нет|без)\b|отсутств", value):
         return False
+    if "exact_value" in situation:
+        return value == situation["exact_value"]
     return bool(re.search(situation["pattern"], value))
+
+
+def observed_situations(facts, bindings):
+    """Nominate shared audience/use facts from the database, without prescribing offers.
+
+    A shared fact plus a separately verified product is a review candidate only;
+    co-occurrence does not establish a buyer-product relation or a need.
+    """
+    generic = re.compile(r"юридическ|физическ|частн|корпоративн|ваш|различн|потребител|предпринимател|государств")
+    for name, fact in sorted(facts.items()):
+        if fact["criterion_id"] not in ("buyer_types", "application_scenarios"):
+            continue
+        if not fact["diagnostic"] or len(bindings[name]) < 2:
+            continue
+        value = normalized_value(fact["label"])
+        if generic.search(value) or re.search(r"\b(?:пао|оао|ооо|зао|ао)\b",value):
+            continue
+        yield {"id": "observed_"+sha256(name.encode()).hexdigest()[:16],
+               "criteria": [fact["criterion_id"]], "exact_value": value,
+               "observation": ("Общий названный тип покупателей: " if fact["criterion_id"]=="buyer_types" else
+                               "Общая названная задача применения: ")+fact["label"]+"; у каждого участника назван конкретный продукт",
+               "limit": "Совместное упоминание не доказывает связь каждого продукта с этой аудиторией/задачей, одинаковый процесс покупки или потребность в услуге. Проверь связь и общую аргументацию по примерам; если оснований нет, откажись."}
 
 
 def diverse_candidates(candidates, limit=12):
@@ -355,7 +379,7 @@ def build_candidate_overview(profiles, *, max_examples=3):
     suggestions, ignored_anchors = _semantic_suggestions(facts, bindings, max_examples=max_examples)
     rule_candidates, rule_bindings = _dealer_rule_candidate(
         facts, bindings, valid_evidence_by_company, max_examples=max_examples)
-    for situation in SITUATIONS:
+    for situation in (*SITUATIONS, *observed_situations(facts, bindings)):
         extra, extra_bindings = _dealer_rule_candidate(
             facts, bindings, valid_evidence_by_company, max_examples=max_examples, situation=situation)
         rule_candidates.extend(extra)
@@ -411,7 +435,7 @@ def build_candidate_overview(profiles, *, max_examples=3):
         "ignored_common_lexical_anchors": ignored_anchors,
     }
     return {
-        "version": 5,
+        "version": 6,
         "summary": summary,
         "concepts": concepts,
         "candidates": candidates,
