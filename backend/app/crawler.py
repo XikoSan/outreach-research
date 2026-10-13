@@ -2,11 +2,27 @@
 import socket, ssl, ipaddress, http.client, gzip, hashlib, json, time, threading
 from datetime import datetime, timezone
 from .config import settings
-from urllib.parse import urlsplit, urljoin
+from urllib.parse import urlsplit, urljoin, urlunsplit, quote
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 
 class SourceUnavailable(Exception):pass
+
+def normalize_url(url):
+    """Encode an IRI for HTTP without double-encoding existing percent escapes."""
+    if any(ord(char)<32 or ord(char)==127 for char in url):
+        raise SourceUnavailable('Управляющий символ в URL')
+    try:
+        p=urlsplit(url)
+        if p.scheme not in ('http','https') or not p.hostname or p.username or p.password or p.port not in (None,80,443):
+            raise SourceUnavailable('Недопустимый URL')
+        host=p.hostname.encode('idna').decode('ascii')
+        if ':' in host:host='['+host+']'
+        netloc=host+(':'+str(p.port) if p.port else '')
+        return urlunsplit((p.scheme,netloc,quote(p.path,safe="/%:@!$&'()*+,;=-._~"),
+                          quote(p.query,safe="%/:?@!$&'()*+,;=-._~"),''))
+    except (ValueError,UnicodeError) as exc:
+        raise SourceUnavailable('Недопустимый URL') from exc
 
 def public_address(url):
     p=urlsplit(url)
@@ -18,6 +34,7 @@ def public_address(url):
 
 def request(url,limit=2_000_000):
     for _ in range(4):
+        url=normalize_url(url)
         p,ip=public_address(url)
         conn=http.client.HTTPConnection(p.hostname,p.port or (443 if p.scheme=='https' else 80),timeout=15)
         sock=socket.create_connection((ip,conn.port),timeout=15)
@@ -80,6 +97,7 @@ def parse_page(final,html):
             'retrieved_at':datetime.now(timezone.utc).isoformat(),'content_hash':hashlib.sha256(text.encode()).hexdigest()}
 
 def fetch(url):
+    url=normalize_url(url)
     # Cache is public source content only; no account or contact information.
     folder=settings.data_dir/'http-cache';folder.mkdir(parents=True,exist_ok=True)
     path=folder/(hashlib.sha256(url.encode()).hexdigest()+'.page.json')

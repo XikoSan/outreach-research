@@ -433,10 +433,12 @@ class Pipeline:
             from .campaigns import prepare_campaign_plan
             prepare_campaign_plan(self)
         with Session() as db:
-            r=db.get(Run,self.id);ids=[c.id for c in db.query(Company).filter_by(run_id=self.id).order_by(Company.id) if c.stage not in ('PROFILE_READY','FAILED') and c.identity!='NEEDS_REVIEW']
+            r=db.get(Run,self.id)
+            scope=db.query(Company).filter_by(run_id=self.id).order_by(Company.id).all()
             maximum=r.config.get('max_companies')
+            ids=[c.id for c in scope if c.stage not in ('PROFILE_READY','FAILED') and c.identity!='NEEDS_REVIEW']
             if maximum:ids=ids[:maximum]
-            self.selected_ids=set(ids)
+            self.selected_ids=set(ids) | {c.id for c in scope if c.stage=='PROFILE_READY'}
         def perform(cid):
             child=Pipeline(self.id) if r.config.get('pipeline_version',1)>=3 and isinstance(self.gw,Gateway) and not self.injected_gateway else self
             try:

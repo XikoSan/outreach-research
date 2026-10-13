@@ -232,3 +232,14 @@ def test_empty_segments_preserve_actionable_reason(client,monkeypatch):
         assert report['diagnostics']['reason']=='no_candidates'
         assert report['generation_notes'][0]['abstention_reason']=='Нет независимого подтверждения гипотезы'
         assert report['generation_notes'][0]['missing_data']==['Проверить первичный внешний источник']
+
+
+def test_resume_classifies_previously_ready_company(client,monkeypatch):
+    rid=new_run(client);monkeypatch.setattr('app.pipeline.fetch',fake_fetch)
+    first=Pipeline(rid,FakeGateway())
+    with Session() as db:cid=db.query(Company).filter_by(run_id=rid).first().id
+    first.research(cid)
+    Pipeline(rid,FakeGateway()).execute()
+    with Session() as db:
+        assert {c.group for c in db.query(Company).filter_by(run_id=rid)}=={'segment_001'}
+        assert not db.query(Export).filter_by(run_id=rid).one().manifest['partial']

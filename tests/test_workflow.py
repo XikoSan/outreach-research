@@ -196,3 +196,12 @@ def test_blank_inn_is_not_assigned_between_conflicting_inns(client):
         ambiguous=next(company for company in companies if not company.context['legal_ids'])
         assert ambiguous.group=='NEEDS_REVIEW'
         assert db.query(SourceRow).filter_by(company_id=ambiguous.id).count()==1
+
+
+def test_http_iri_encoding_preserves_escapes_and_rejects_unsafe_urls():
+    from app.crawler import normalize_url
+    value=normalize_url('https://пример.рф/каталог/рыба и мясо?тип=1&x=%20')
+    assert value.isascii() and ' ' not in value and value.endswith('&x=%20')
+    assert normalize_url(value)==value
+    for unsafe in ['https://example.com/\r\nHost: localhost','https://user:pass@example.com/', 'file:///tmp/a']:
+        with pytest.raises(SourceUnavailable):normalize_url(unsafe)
