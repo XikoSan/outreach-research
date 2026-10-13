@@ -33,6 +33,7 @@ class SenderProfile(Strict):
     materials: str = ''
     offers: list[Offer] = Field(default_factory=list)
 class RunConfig(Strict):
+    segmentation_method: Literal['candidates','semantic-profiles-v1'] = 'candidates'
     methodology_version: Literal['legacy','campaign-v1'] = 'legacy'
     research_directions: list[Literal['website','social','jobs','reviews','forums']] = Field(default_factory=lambda: list(RESEARCH_DIRECTIONS))
     @field_validator('research_directions')

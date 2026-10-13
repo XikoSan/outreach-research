@@ -275,7 +275,12 @@ class Pipeline:
         # Exact shared facts are found before any model context is divided.
         candidate_overview=None
         batches=[]
-        if campaign_mode and r.reports['campaign_plan'].get('version')=='campaign-v2':
+        semantic_mode=campaign_mode and r.config.get('segmentation_method')=='semantic-profiles-v1'
+        if semantic_mode:
+            from .semantic_segmentation import discover
+            candidates,audit=discover(self,profiles,sender['offers'])
+            generation_notes.append(audit)
+        elif campaign_mode and r.reports['campaign_plan'].get('version')=='campaign-v2':
             from .candidate_discovery import build_candidate_overview, diverse_candidates
             candidate_overview=build_candidate_overview(profiles)
             compact=candidate_overview['model_overview']
