@@ -67,6 +67,22 @@ def compact_segment_review_profile(profile, segment):
             'evidence':evidence, 'contradictions':profile.get('contradictions',[])[:10],
             'limitations':profile.get('limitations',[])[:10]}
 
+def compact_segment_review_bindings(segment, profiles):
+    """Review references must point only to facts actually included in the payload."""
+    if not segment.get('member_bindings'):return segment
+    bindings={}
+    for profile in profiles:
+        original=segment['member_bindings'].get(profile['company_id'])
+        if not original:continue
+        names={s['name'] for s in profile['signals']}
+        ids={e['id'] for e in profile['evidence']}
+        bindings[profile['company_id']]={facet:{
+            'raw_signal_names':[n for n in original.get(facet,{}).get('raw_signal_names',[]) if n in names],
+            'evidence_ids':[eid for eid in original.get(facet,{}).get('evidence_ids',[]) if eid in ids]
+        } for facet in ('channel','product')}
+    return {**segment,'member_bindings':bindings}
+
+
 def verify_report(report,pages,direction,days):
     by_url={p['url']:p for p in pages}
     accepted=[];mapping={};issues=[]
@@ -362,8 +378,12 @@ class Pipeline:
                 if len(positive)<(2 if campaign_mode else 1):continue
                 examples=positive[:3]+negative[:2]
             review_examples=[compact_segment_review_profile(profile,seg) for profile in examples]
-            review_segment={**seg,'member_bindings':{p['company_id']:seg['member_bindings'][p['company_id']] for p in examples if p['company_id'] in seg.get('member_bindings',{})}} if seg.get('member_bindings') else seg
-            review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':review_segment,'profiles':review_examples,'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
+            review_segment=compact_segment_review_bindings(seg,review_examples)
+            review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':review_segment,'profiles':review_examples,
+                'review_coverage':{'total_verified_members':len(positive) if v3 else None,
+                                  'shown_member_ids':[p['company_id'] for p in examples if p['company_id'] in {x['company_id'] for x in positive}] if v3 else [],
+                                  'sampling_note':'Показаны примеры участников и контрольные неучастники. Общее число участников проверено классификатором по полным сохранённым доказательствам; не требуй присутствия всей группы в примерах.'},
+                'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
             reviews.append({'segment':seg,'review':review.model_dump(),'evaluations':evaluations})
             if review.passed:
                 relevant=set(seg['required_signals']+seg['supporting_signals']+

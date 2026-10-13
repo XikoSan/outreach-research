@@ -704,3 +704,16 @@ def test_campaign_rule_candidate_checks_each_company_raw_evidence(client,monkeyp
                   'signals':[signal for signal in company.profile['signals']
                              if not signal['name'].startswith('criterion_buyer_types__')]}
         assert classify_campaign(weakened,evidence_for(company),run.segments)[0]!='segment_001'
+
+
+def test_review_bindings_do_not_reference_omitted_facts_or_change_membership():
+    from app.pipeline import compact_segment_review_bindings
+    original={'member_bindings':{'a':{'channel':{'raw_signal_names':['c'],'evidence_ids':['ec']},
+                                    'product':{'raw_signal_names':['p','omitted'],'evidence_ids':['ep','missing']}},
+                                'b':{'channel':{},'product':{}}}}
+    profiles=[{'company_id':'a','signals':[{'name':'c'},{'name':'p'}],'evidence':[{'id':'ec'},{'id':'ep'}]}]
+    compact=compact_segment_review_bindings(original,profiles)
+    assert set(compact['member_bindings'])=={'a'}
+    assert compact['member_bindings']['a']['product']=={'raw_signal_names':['p'],'evidence_ids':['ep']}
+    assert len(original['member_bindings'])==2
+    assert original['member_bindings']['a']['product']['evidence_ids']==['ep','missing']
