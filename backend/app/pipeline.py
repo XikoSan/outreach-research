@@ -260,11 +260,11 @@ class Pipeline:
         candidate_overview=None
         batches=[]
         if campaign_mode and r.reports['campaign_plan'].get('version')=='campaign-v2':
-            from .candidate_discovery import build_candidate_overview
+            from .candidate_discovery import build_candidate_overview, diverse_candidates
             candidate_overview=build_candidate_overview(profiles)
             compact=candidate_overview['model_overview']
-            viable=[item for item in compact['candidates'] if item['two_verified_facts_company_count']>=2][:12]
-            viable_rules=compact.get('rule_candidates',[])[:12]
+            viable=diverse_candidates([item for item in compact['candidates'] if item['two_verified_facts_company_count']>=2])
+            viable_rules=diverse_candidates(compact.get('rule_candidates',[]))
             if (viable or viable_rules) and sender['offers']:
                 model_input={**compact,
                              'candidates':[{**item,'company_ids':item['company_ids'][:10]} for item in viable],
@@ -301,6 +301,9 @@ class Pipeline:
                 generation_notes.append({'abstention_reason':result.abstention_reason,
                                          'missing_data':result.missing_data,
                                          'candidate_count':len(candidates),
+                                         'sent_candidate_ids':[item['id'] for item in viable+viable_rules],
+                                         'not_proposed_candidate_ids':[item['id'] for item in viable+viable_rules
+                                             if not any(v.id==item['id'] or (item.get('raw_signal_names') and set(item['raw_signal_names'])<=set(v.required_signals)) for v in result.segments)],
                                          'rejected_unanchored':len(result.segments)-len(candidates)})
             else:
                 generation_notes.append({'abstention_reason':'Нет общей пары с двумя разными подтверждёнными доказательствами у каждой компании' if sender['offers'] else 'Не описаны услуги отправителя',

@@ -207,3 +207,30 @@ def test_dealer_channel_rule_connects_different_products_without_equating_them()
     assert bindings['b']['channel']['evidence_ids'] == ['b-channel']
     assert bindings['b']['product']['evidence_ids'] == ['b-product']
     assert result['model_overview']['rule_candidates'][0]['company_ids'] == ['a', 'b']
+
+
+def test_situation_matches_different_products_and_buyer_word_forms_with_evidence():
+    from app.campaigns import classify_campaign
+    items=[]
+    for cid,buyer,product in [('a','ресторанам','Холодильные камеры'),('b','предприятия общественного питания','Кассовые аппараты'),('negative','не работаем с ресторанами','Печи'),('wrong_type','рестораны','Вывески')]:
+        criterion='products' if cid=='wrong_type' else 'buyer_types'
+        items.append(profile(cid,[fact(criterion,buyer,cid+'b'),fact('products',product,cid+'p')],
+                             [evidence(cid+'b'),evidence(cid+'p')]))
+    result=build_candidate_overview(items)
+    rule=next(c for c in result['rule_candidates'] if c['id']=='rule_hospitality_buyers')
+    assert rule['company_ids']==['a','b']
+    segment={'id':'s','basis_type':'applicability','contradicting_signals':[],
+             'member_bindings':result['bindings']['rule_candidates'][rule['id']]}
+    assert classify_campaign(items[0],items[0]['evidence'],[segment])[0]=='s'
+    assert classify_campaign(items[2],items[2]['evidence'],[segment])[0]=='UNCLASSIFIED'
+    invalid=[{**e,'current':False} for e in items[0]['evidence']]
+    assert classify_campaign(items[0],invalid,[segment])[0]=='INSUFFICIENT_DATA'
+
+
+def test_diversity_does_not_spend_slots_on_identical_audiences():
+    from app.candidate_discovery import diverse_candidates
+    candidates=[{'id':str(i),'company_ids':['a','b','c'],'company_count':3} for i in range(30)]
+    candidates += [{'id':'different','company_ids':['d','e'],'company_count':2}]
+    selected=diverse_candidates(candidates,limit=2)
+    assert [c['id'] for c in selected]==['0','different']
+    assert len(candidates)==31

@@ -133,14 +133,15 @@ def _dealer_channel(label):
     return any(word.startswith("дилер") for word in words)
 
 
-def _dealer_rule_candidate(facts, bindings, valid_evidence_by_company, *, max_examples):
+def _dealer_rule_candidate(facts, bindings, valid_evidence_by_company, *, max_examples, situation=None):
     """Nominate dealer-channel + any concrete product without equating products.
 
     The result is an unreviewed common-situation rule. An offer and its shared
     message must be checked separately; no company is assigned here.
     """
     channel_names = {name for name, fact in facts.items()
-                     if fact["criterion_id"] == "buyer_types" and _dealer_channel(fact["label"])}
+                     if (_matches_situation(fact, situation) if situation else
+                         fact["criterion_id"] == "buyer_types" and _dealer_channel(fact["label"]))}
     product_names = {name for name, fact in facts.items()
                      if fact["criterion_id"] == "products" and fact["diagnostic"]}
     by_company = defaultdict(lambda: {"channel": set(), "product": set()})
@@ -155,7 +156,7 @@ def _dealer_rule_candidate(facts, bindings, valid_evidence_by_company, *, max_ex
     if len(members) < 2:
         return [], {}
 
-    rule_id = "rule_dealer_channel_any_product"
+    rule_id = "rule_" + situation["id"] if situation else "rule_dealer_channel_any_product"
     member_map = {}
     distinct_citations = []
     independent_sources = []
@@ -197,7 +198,58 @@ def _dealer_rule_candidate(facts, bindings, valid_evidence_by_company, *, max_ex
         "status": "unreviewed_rule_candidate",
         "requires_offer_review": True,
     }
+    if situation:
+        candidate.update(kind="shared_situation_any_specific_product", channel=situation["id"],
+                         shared_observation=situation["observation"], claim_limit=situation["limit"],
+                         required_criteria=[*situation["criteria"], "products"])
     return [candidate], {rule_id: member_map}
+
+# Controlled common situations nominate audiences; they never prove need or an offer.
+SITUATIONS = (
+    {"id": "hospitality_buyers", "criteria": ["buyer_types"],
+     "pattern": r"ресторан|общепит|общественн\w* питан|кафе|horeca|hotel|отел|гостиниц",
+     "observation": "Назван конкретный продукт и покупатели из общепита или гостиничного бизнеса",
+     "limit": "Не установлены одинаковый формат покупателей, комплексность поставки и потребность в услуге"},
+    {"id": "medical_buyers", "criteria": ["buyer_types"],
+     "pattern": r"больниц|поликлиник|клиник|медицинск\w* (?:центр|учрежден)",
+     "observation": "Назван конкретный продукт и медицинские учреждения среди покупателей",
+     "limit": "Не установлены способ закупки, лицо принятия решения и потребность в услуге"},
+    {"id": "custom_specification", "criteria": ["application_scenarios"],
+     "pattern": r"по (?:вашим |вашим размерам и )?чертеж|по тз заказчик|по размерам заказчик|по чдт|по образцу заказчик",
+     "observation": "Назван конкретный продукт и работа по чертежам, размерам или техническому заданию заказчика",
+     "limit": "Не установлены доля заказного производства, сложность продажи и потребность в услуге"},
+    {"id": "partner_buyers", "criteria": ["buyer_types"],
+     "pattern": r"партн[её]р|дистрибьют|интегратор",
+     "observation": "Назван конкретный продукт и партнёры, дистрибьюторы или интеграторы среди адресатов",
+     "limit": "Эти роли не равнозначны; не установлены действующая сеть, её размер и необходимость развития"},
+)
+
+
+def _matches_situation(fact, situation):
+    value = normalized_value(fact["label"])
+    if fact["criterion_id"] not in situation["criteria"]:
+        return False
+    if re.search(r"\b(?:не|нет|без)\b|отсутств", value):
+        return False
+    return bool(re.search(situation["pattern"], value))
+
+
+def diverse_candidates(candidates, limit=12):
+    """Maximise additional audience coverage; suppress repeated member sets.
+
+    This is a nomination heuristic, never a quality score or membership change.
+    Preserve one representative when the audience is entirely covered already.
+    """
+    remaining=list(candidates);selected=[];covered=set();seen=set()
+    while remaining and len(selected)<limit:
+        best=max(remaining,key=lambda c:(len(set(c["company_ids"])-covered),
+                 c.get("distinct_citation_company_count",0),c["company_count"]))
+        remaining.remove(best)
+        members=frozenset(best["company_ids"])
+        if members in seen:continue
+        seen.add(members);covered.update(members);selected.append(best)
+    return selected
+
 
 def build_candidate_overview(profiles, *, max_examples=3):
     """Return global exact cohorts and an auditable candidate→raw-fact map.
@@ -303,6 +355,11 @@ def build_candidate_overview(profiles, *, max_examples=3):
     suggestions, ignored_anchors = _semantic_suggestions(facts, bindings, max_examples=max_examples)
     rule_candidates, rule_bindings = _dealer_rule_candidate(
         facts, bindings, valid_evidence_by_company, max_examples=max_examples)
+    for situation in SITUATIONS:
+        extra, extra_bindings = _dealer_rule_candidate(
+            facts, bindings, valid_evidence_by_company, max_examples=max_examples, situation=situation)
+        rule_candidates.extend(extra)
+        rule_bindings.update(extra_bindings)
     model_candidates = [
         {
             "id": candidate["id"],
@@ -354,7 +411,7 @@ def build_candidate_overview(profiles, *, max_examples=3):
         "ignored_common_lexical_anchors": ignored_anchors,
     }
     return {
-        "version": 4,
+        "version": 5,
         "summary": summary,
         "concepts": concepts,
         "candidates": candidates,
