@@ -14,7 +14,7 @@ def counts(db,rid):
         groups[group]+=n
         if stage=='PROFILE_READY' and identity=='CONFIRMED':researched+=n
         if stage=='PROFILE_READY' or group in ATTENTION or group=='EXCLUDED':finished+=n
-    return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION),'excluded':groups['EXCLUDED']}
+    return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION),'excluded':groups['EXCLUDED'],'general':sum(n for g,n in groups.items() if not g.startswith('segment_'))}
 
 def visible_reports(company,run):
     allowed=selected_directions(run.config)

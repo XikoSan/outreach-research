@@ -58,7 +58,7 @@ def test_research_stops_before_prompt_and_resume_reuses_profiles(client,monkeypa
 def test_pilot_does_not_lose_unprocessed_rows(client,monkeypatch):
     rid=new_run(client,pilot=1);monkeypatch.setattr('app.pipeline.fetch',fake_fetch);Pipeline(rid,FakeGateway()).execute()
     with Session() as db:
-        e=db.query(Export).filter_by(run_id=rid).one();assert e.manifest['rows']==2;assert e.manifest['partial'];assert e.manifest['groups']['NOT_PROCESSED']==1
+        e=db.query(Export).filter_by(run_id=rid).one();assert e.manifest['rows']==2;assert e.manifest['partial'];assert e.manifest['groups']['GENERAL']==1
 
 def test_page_checkpoint_survives_extraction_failure(client,monkeypatch):
     rid=new_run(client);fetcher=Mock(side_effect=fake_fetch);monkeypatch.setattr('app.pipeline.fetch',fetcher)

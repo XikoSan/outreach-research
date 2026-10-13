@@ -1,3 +1,4 @@
+from .audiences import GENERAL, GENERAL_RULES, audience_filter, general_segment, general_template
 """Immutable workbook registry and verified row-preserving partition export."""
 import hashlib, json, re, shutil, unicodedata, zipfile
 from copy import copy
@@ -233,7 +234,7 @@ def export_run(db,run,root,partial=None):
     for r in rows:
         group=companies[r.company_id].group
         if group not in STATUS_GROUPS and not re.fullmatch(r'segment_\d{3,}',group):raise ValueError('Некорректная группа')
-        grouped[group].append(r)
+        grouped[group if group in segments else GENERAL].append(r)
     export_id=uid();stage=Path(root)/('tmp-'+export_id);dest=Path(root)/export_id
     stage.mkdir(parents=True)
     source=load_workbook(run.source_path)
@@ -241,7 +242,7 @@ def export_run(db,run,root,partial=None):
     seen=set()
     try:
         for group,members in sorted(grouped.items()):
-            folder='statuses' if group in STATUS_GROUPS else 'databases'
+            folder='databases'
             out=Workbook();out.remove(out.active)
             bysheet=defaultdict(list)
             for row in members:bysheet[row.sheet].append(row)
@@ -259,8 +260,8 @@ def export_run(db,run,root,partial=None):
                         if c.comment:target.comment=copy(c.comment)
                     ws.row_dimensions[dest_i].height=src.row_dimensions[original_i].height
                 ws.auto_filter.ref=ws.dimensions
-            if group == 'EXCLUDED':
-                audit=out.create_sheet('Причины исключения')
+            if group == GENERAL:
+                audit=out.create_sheet('Причины группы Общее')
                 audit.append(['Компания', 'Причина', 'Основание', 'Ссылка'])
                 unique={row.company_id for row in members}
                 for company_id in sorted(unique):
@@ -285,6 +286,8 @@ def export_run(db,run,root,partial=None):
                     if row.id in seen:raise ValueError('Повтор строки в экспорте')
                     seen.add(row.id)
             verified.close();manifest['files'].append(str(target.relative_to(stage)));manifest['groups'][group]=len(members)
+            if group == GENERAL:
+                p=stage/'prompts'/'GENERAL.md';p.parent.mkdir(exist_ok=True);p.write_text(general_template(run),encoding='utf-8');manifest['files'].append(str(p.relative_to(stage)))
             if group not in STATUS_GROUPS and segments.get(group,{}).get('prompt'):
                 p=stage/'prompts'/(group+'.md');p.parent.mkdir(exist_ok=True);p.write_text(segments[group]['prompt'],encoding='utf-8');manifest['files'].append(str(p.relative_to(stage)))
         if len(seen)!=run.row_count:raise ValueError('Нарушено количество строк')

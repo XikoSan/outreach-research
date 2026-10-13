@@ -99,15 +99,14 @@ def test_manual_exclusion_has_reason_can_be_restored_and_invalidates_old_files(c
     assert client.get('/api/packages/package_for_exclusion/download').status_code == 409
     assert client.get(f'/api/exports/{old_export}/download').status_code == 409
     fresh = client.post(f'/api/runs/{rid}/exports').json()
-    assert fresh['manifest']['groups']['EXCLUDED'] == 1
-    assert 'statuses/EXCLUDED.xlsx' in fresh['manifest']['files']
+    assert fresh['manifest']['groups']['GENERAL'] == 2
+    assert 'databases/GENERAL.xlsx' in fresh['manifest']['files']
     from openpyxl import load_workbook
     from app.db import Export
     with Session() as db:
         export=db.get(Export,fresh['id'])
-        wb=load_workbook(export.path+'/statuses/EXCLUDED.xlsx',read_only=True)
-        assert wb['Причины исключения']['B2'].value
-        assert wb['Причины исключения']['D2'].value=='https://alpha.example/contacts'
+        wb=load_workbook(export.path+'/databases/GENERAL.xlsx',read_only=True)
+        assert any(row[3]=='https://alpha.example/contacts' and row[1] for row in list(wb['Причины группы Общее'].values)[1:])
         wb.close()
     assert client.delete(f'/api/companies/{cid}/exclusion').status_code == 200
     assert client.get(f'/api/runs/{rid}').json()['excluded'] == 0

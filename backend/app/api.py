@@ -1,3 +1,4 @@
+from .audiences import GENERAL, GENERAL_RULES, audience_filter, general_segment, general_template
 from contextlib import asynccontextmanager
 from pathlib import Path
 import hashlib, json, shutil
@@ -225,7 +226,7 @@ def retry(rid:str,payload:RetryRequest):
 def companies(rid:str,offset:int=Query(0,ge=0),limit:int=Query(40,ge=1,le=100),group:str|None=None,q:str='',attention_only:bool=False):
     with Session() as db:
         run=get(db,Run,rid);query=db.query(Company).filter_by(run_id=rid)
-        if group:query=query.filter_by(group=group)
+        if group:query=query.filter(audience_filter(run,group))
         if attention_only:query=query.filter(Company.group.in_(ATTENTION))
         if q:query=query.filter(Company.name.ilike('%'+q+'%'))
         total=query.count()

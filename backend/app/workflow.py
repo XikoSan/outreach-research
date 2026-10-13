@@ -1,3 +1,4 @@
+from .audiences import GENERAL, GENERAL_RULES, audience_filter, general_segment, general_template
 """Research context, stage reports, audience selection and independent prompt jobs."""
 import hashlib
 import io
@@ -127,6 +128,10 @@ def segment_summaries(rid:str):
         if eligible:
             best=max(eligible,key=lambda s:(s['strong_signals']/s['company_count'],s.get('confidence')=='HIGH',s['contact_count']))
             best.update(recommended=True,recommendation_reason='Первый вариант для проверки: нет отмеченных противоречий; наиболее высокая средняя обеспеченность подтверждёнными признаками среди доступных сегментов. Должности и адреса получателей проверьте при выборе контактов.')
+        general_companies=db.query(Company).filter(Company.run_id==rid,audience_filter(r,GENERAL)).count()
+        if general_companies:
+            general_rows=db.query(SourceRow).join(Company,SourceRow.company_id==Company.id).filter(SourceRow.run_id==rid,audience_filter(r,GENERAL)).count()
+            result.append({**general_segment(),'company_count':general_companies,'contact_count':general_rows,'recommended':False})
         return result
 
 @router.get('/runs/{rid}/contacts')
@@ -134,7 +139,7 @@ def contacts(rid:str,segment_id:str='',company_id:str='',q:str='',offset:int=Que
     with Session() as db:
         r=get(db,Run,rid)
         query=db.query(SourceRow,Company).join(Company,SourceRow.company_id==Company.id).filter(SourceRow.run_id==rid)
-        if segment_id:query=query.filter(Company.group==segment_id)
+        if segment_id:query=query.filter(audience_filter(r,segment_id))
         if company_id:query=query.filter(Company.id==company_id)
         if q:query=query.filter(Company.name.ilike('%'+q+'%'))
         total=query.count();items=[]
@@ -194,6 +199,7 @@ def freeze_contacts(run,rows,path):
 
 
 def excluded_package_members(db, p):
+    if p.segment_snapshot.get("audience_type")=="general":return 0
     return db.query(Company.id).filter(Company.run_id==p.run_id, Company.id.in_(p.selection.get('company_ids', [])), Company.group=='EXCLUDED').count()
 
 def package_view(p,detail=False):
@@ -213,11 +219,11 @@ def create_package(rid:str,payload:PackageInput):
         if payload.request_id and (existing:=db.get(PromptPackage,payload.request_id)):
             if existing.run_id!=rid or existing.selection.get('request_hash')!=request_hash:raise HTTPException(409,'Этот запрос уже создал другой комплект. Откройте список комплектов.')
             return package_view(existing)
-        if r.status in ACTIVE or not r.segmentation_version:raise HTTPException(409,'Дождитесь завершения исследования и сегментации')
+        if r.status in ACTIVE or (not r.segmentation_version and payload.segment_id!=GENERAL):raise HTTPException(409,'Дождитесь завершения исследования и сегментации')
         if not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
-        segment=next((s for s in r.segments if s['id']==payload.segment_id),None)
+        segment=general_segment() if payload.segment_id==GENERAL else next((s for s in r.segments if s['id']==payload.segment_id),None)
         if not segment:raise HTTPException(404,'Сегмент не найден')
-        query=db.query(SourceRow).join(Company,SourceRow.company_id==Company.id).filter(SourceRow.run_id==rid,Company.group==payload.segment_id)
+        query=db.query(SourceRow).join(Company,SourceRow.company_id==Company.id).filter(SourceRow.run_id==rid,audience_filter(r,payload.segment_id))
         if payload.selection_mode=='companies':
             if not payload.company_ids:raise HTTPException(422,'Выберите компании')
             query=query.filter(SourceRow.company_id.in_(payload.company_ids))
@@ -293,7 +299,7 @@ def generate_package(pid,gateway=None):
         payload={'segment':p.segment_snapshot,'sender':sender,'research_context':p.context_snapshot.get('prepared_text') or p.context_snapshot.get('source_text') or p.context_snapshot.get('summary',''),'recipient_type':p.recipient_type,'next_step':p.next_step,'contacts':len(p.selection['row_ids'])}
         prompt=p.prompt;review=p.review
     gw=gateway or Gateway(rid,package_id=pid)
-    campaign_instructions=''
+    campaign_instructions=GENERAL_RULES if payload['segment'].get('audience_type')=='general' else ''
     if payload['segment'].get('basis_type'):
         from .campaigns import campaign_prompt_contract
         payload['campaign_contract']=campaign_prompt_contract(payload['segment'],payload['next_step'])

@@ -27,9 +27,10 @@ def test_roundtrip_preserves_duplicates_and_strings(client):
     z=zipfile.ZipFile(io.BytesIO(client.get(f"/api/exports/{ex['id']}/download").content))
     actual=[]
     for f in z.namelist():
+        if not f.endswith(".xlsx"):continue
         w=load_workbook(io.BytesIO(z.read(f)));actual+=list(w.active.values)[1:]
     assert sorted(map(str,actual))==sorted(map(str,map(tuple,rows)))
-    assert not any(n.endswith('.md') for n in z.namelist())
+    assert 'prompts/GENERAL.md' in z.namelist()
     assert client.get(f"/api/exports/{ex['id']}/download?file=../../.env").status_code==404
 
 def test_formula_rejected_before_research(client):

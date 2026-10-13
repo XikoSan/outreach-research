@@ -209,3 +209,35 @@ def test_campaign_contract_reaches_prompt_and_review(client,monkeypatch):
         assert c['next_step']=='Обсудить задачу на встрече'
         assert c['cooperation_proposal']=='Исследование критериев выбора покупателей'
         assert 'не утверждай наличие проблемы' in instructions
+
+
+def test_general_audience_includes_exclusions_and_generates_separate_prompt(client,monkeypatch):
+    r,_=research(client,monkeypatch,False)
+    with Session() as db:
+        run=db.get(Run,r['id']);run.status='COMPLETED_WITH_ISSUES'
+        companies=db.query(Company).filter_by(run_id=run.id).all()
+        companies[0].group='EXCLUDED';companies[0].reason='Нет актуальных источников'
+        companies[1].group='UNCLASSIFIED'
+        db.commit()
+    summaries=client.get(f"/api/runs/{r['id']}/segments").json()
+    assert len(summaries)==1 and summaries[0]['id']=='GENERAL'
+    assert summaries[0]['company_count']==2 and summaries[0]['contact_count']==3
+    assert client.get(f"/api/runs/{r['id']}/companies?group=GENERAL").json()['total']==2
+    assert client.get(f"/api/runs/{r['id']}/contacts?segment_id=GENERAL").json()['total']==3
+    response=package(client,r['id'],segment_id='GENERAL')
+    assert response.status_code==200,response.text
+    pid=response.json()['id']
+    with Session() as db:
+        p=db.get(PromptPackage,pid);p.status='RUNNING';db.commit()
+    captured=[]
+    class Capture(FakeGateway):
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            captured.append((instructions,payload))
+            return super().ask(role,instructions,payload,schema,**kwargs)
+    generate_package(pid,Capture())
+    assert len(captured)==2
+    assert all('Не утверждай соответствие услуг адресату' in instructions for instructions,_ in captured)
+    assert all(payload['segment']['audience_type']=='general' for _,payload in captured)
+    detail=client.get('/api/packages/'+pid).json()
+    assert detail['status']=='COMPLETED' and not detail['stale']
+    assert client.get('/api/packages/'+pid+'/download').status_code==200
