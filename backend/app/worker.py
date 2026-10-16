@@ -36,6 +36,9 @@ def main():
         if not run_id and not package_id:time.sleep(1);continue
         try:
             if package_id:generate_package(package_id)
+            elif run and run.config.get('workflow')=='offer-coarse-v2':
+                from .offer_coarse import execute as execute_offer_coarse
+                execute_offer_coarse(run_id)
             elif run and run.config.get('workflow')=='coarse-v1':
                 from .coarse import execute as execute_coarse
                 execute_coarse(run_id)

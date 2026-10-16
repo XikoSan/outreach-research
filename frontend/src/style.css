@@ -21,3 +21,6 @@
 .audience-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:18px 0}
 .audience-card{display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:left;min-height:54px}
 .audience-card span{font-weight:700}
+
+/* First-pass form stays compact on wide screens. */
+.new-research-block{max-width:960px}.new-research-block label{max-width:900px}

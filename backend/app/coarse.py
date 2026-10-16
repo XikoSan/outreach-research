@@ -106,7 +106,7 @@ def execute(run_id: str) -> None:
 
 def export(db, run: Run, root: Path) -> Export:
     """Export original rows and stable IDs; excluded rows are never in mailing files."""
-    if run.config.get('workflow')!='coarse-v1' or run.status!='COMPLETED':raise ValueError('Быстрый анализ не завершён')
+    if run.config.get('workflow') not in ('coarse-v1','offer-coarse-v2') or run.status!='COMPLETED':raise ValueError('Быстрый анализ не завершён')
     if hashlib.sha256(Path(run.source_path).read_bytes()).hexdigest()!=run.source_hash:raise ValueError('Исходный файл изменён')
     companies={c.id:c for c in db.query(Company).filter_by(run_id=run.id)}
     rows=db.query(SourceRow).filter_by(run_id=run.id).order_by(SourceRow.sheet,SourceRow.row_index).all()
@@ -119,7 +119,7 @@ def export(db, run: Run, root: Path) -> Export:
     export_id=uid();stage=Path(root)/('tmp-'+export_id);dest=Path(root)/export_id
     stage.mkdir(parents=True)
     source=load_workbook(run.source_path)
-    manifest={'kind':'coarse-v1','contract_version':1,'source_run_id':run.id,'export_id':export_id,'segment_set_version':run.segmentation_version,'rows':len(rows),'files':[],'groups':{},'mailing_rows':0,'do_not_send_rows':len(grouped['DO_NOT_SEND'])}
+    manifest={'kind':run.config.get('workflow','coarse-v1'),'contract_version':1,'source_run_id':run.id,'export_id':export_id,'segment_set_version':run.segmentation_version,'rows':len(rows),'files':[],'groups':{},'mailing_rows':0,'do_not_send_rows':len(grouped['DO_NOT_SEND'])}
     seen=set()
     try:
         for group,members in sorted(grouped.items()):
@@ -156,6 +156,7 @@ def export(db, run: Run, root: Path) -> Export:
         # immutable IDs travel in the same row, so replies can be linked without name guessing.
         mailing=Workbook();mailing.remove(mailing.active)
         service_headers=['source_run_id','export_id','segment_set_version','company_id','source_row_id','audience_id']
+        if run.config.get('workflow')=='offer-coarse-v2':service_headers+=['vacancy_signal','vacancy_role','vacancy_url']
         for spec in run.config['sheets']:
             title=spec['name'];original=source[title];sheet=mailing.create_sheet(title)
             width=original.max_column
@@ -169,7 +170,10 @@ def export(db, run: Run, root: Path) -> Export:
                     target=sheet.cell(index,cell.column,cell.value);target.data_type=cell.data_type
                     if cell.has_style:target._style=copy(cell._style)
                     if cell.hyperlink:target._hyperlink=copy(cell.hyperlink)
-                for column,value in enumerate([run.id,export_id,run.segmentation_version,row.company_id,row.id,companies[row.company_id].group],width+1):
+                vacancy=(companies[row.company_id].profile or {}).get('coarse_vacancy',{})
+                values=[run.id,export_id,run.segmentation_version,row.company_id,row.id,companies[row.company_id].group]
+                if run.config.get('workflow')=='offer-coarse-v2':values += [vacancy.get('state','NOT_CONFIRMED'),vacancy.get('role',''),vacancy.get('url','')]
+                for column,value in enumerate(values,width+1):
                     sheet.cell(index,column,value)
             sheet.freeze_panes='A2';sheet.auto_filter.ref=sheet.dimensions
         mailing_path=stage/'mailing.xlsx';mailing.save(mailing_path);mailing.close()
@@ -177,10 +181,16 @@ def export(db, run: Run, root: Path) -> Export:
         path=stage/'integration.csv'
         with path.open('w',newline='',encoding='utf-8-sig') as stream:
             writer=csv.writer(stream)
-            writer.writerow(['source_run_id','export_id','segment_set_version','company_id','source_row_id','audience_id','do_not_send','source_sheet','source_row_index'])
+            headers=['source_run_id','export_id','segment_set_version','company_id','source_row_id','audience_id','do_not_send','source_sheet','source_row_index']
+            if run.config.get('workflow')=='offer-coarse-v2':headers+=['vacancy_signal','vacancy_role','vacancy_url']
+            writer.writerow(headers)
             for row in rows:
                 company=companies[row.company_id]
-                writer.writerow([run.id,export_id,run.segmentation_version,company.id,row.id,company.group,int(company.group=='DO_NOT_SEND'),row.sheet,row.row_index])
+                values=[run.id,export_id,run.segmentation_version,company.id,row.id,company.group,int(company.group=='DO_NOT_SEND'),row.sheet,row.row_index]
+                if run.config.get('workflow')=='offer-coarse-v2':
+                    vacancy=(company.profile or {}).get('coarse_vacancy',{})
+                    values += [vacancy.get('state','NOT_CONFIRMED'),vacancy.get('role',''),vacancy.get('url','')]
+                writer.writerow(values)
         manifest['files'].append('integration.csv')
         description=stage/'audiences.json'
         description.write_text(json.dumps(run.segments,ensure_ascii=False,indent=2),encoding='utf-8')

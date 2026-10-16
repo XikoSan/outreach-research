@@ -48,7 +48,8 @@ def export_stale(db, export):
 
 def run_view(r):
     result={k:getattr(r,k) for k in ('id','name','filename','status','stage','row_count','company_count','spent','reserved','budget','error','segmentation_version','created_at','config','sender_snapshot','context_snapshot')}
-    result['segments']=[{'id':segment['id'],'name':segment['name']} for segment in r.segments]
+    result['segments']=r.segments if r.config.get('workflow')=='offer-coarse-v2' else [{'id':segment['id'],'name':segment['name']} for segment in r.segments]
+    result['confirmed_vacancies']=(r.reports or {}).get('coarse',{}).get('confirmed_vacancies',0)
     return result
 
 def sender_view(s):
@@ -128,6 +129,16 @@ def research_list(q:str='',status:str='',offset:int=Query(0,ge=0),limit:int=Quer
             items.append({k:getattr(r,k) for k in ('id','name','filename','company_count','status','stage','created_at')}|{'sender_name':r.context_snapshot.get('name') or r.sender_snapshot.get('profile',{}).get('brand',''), 'row_count':r.row_count,'workflow':r.config.get('workflow','legacy'),**counts(db,r.id)})
         return {'items':items,'total':total}
 
+@app.get('/api/offer-runs')
+def offer_runs(offset:int=Query(0,ge=0),limit:int=Query(20,ge=1,le=50)):
+    with Session() as db:
+        query=db.query(Run).filter(Run.config['workflow'].as_string()=='offer-coarse-v2')
+        total=query.count()
+        items=[]
+        for r in query.order_by(Run.created_at.desc(),Run.id).offset(offset).limit(limit):
+            items.append({k:getattr(r,k) for k in ('id','name','company_count','row_count','status','stage','created_at','spent')}|counts(db,r.id))
+        return {'items':items,'total':total}
+
 @app.post('/api/runs')
 def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=Form(0),config_json:str=Form('{}'),name:str=Form(''),context_id:str=Form(''),source_filters:str=Form('')):
     if len(name)>200:raise HTTPException(422,'Название: до 200 символов')
@@ -182,6 +193,33 @@ def create_coarse_run(file:UploadFile=File(...),name:str=Form(''),source_filters
             db.rollback();shutil.rmtree(folder,ignore_errors=True);raise HTTPException(422,str(exc))
         return run_view(run)
 
+@app.post('/api/offer-runs')
+def create_offer_run(file:UploadFile=File(...),name:str=Form(''),source_filters:str=Form(''),offer_text:str=Form(...),offer_filename:str=Form('')):
+    """Freeze the offered services with the imported base; no sender profile needed."""
+    offer=offer_text.strip()
+    if not 10<=len(offer)<=100_000:raise HTTPException(422,'Опишите предложение: от 10 до 100 000 символов')
+    if len(name)>200 or len(source_filters)>8000:raise HTTPException(422,'Слишком длинное название или описание фильтров')
+    if Path(file.filename or '').suffix.lower()!='.xlsx':raise HTTPException(422,'Нужен файл XLSX')
+    content=file.file.read(25_000_001)
+    if len(content)>25_000_000:raise HTTPException(413,'Лимит XLSX 25 МБ')
+    rid=uid();folder=settings.data_dir/'uploads'/rid;folder.mkdir(parents=True)
+    path=folder/'source.xlsx';path.write_bytes(content)
+    with Session() as db:
+        run=Run(id=rid,name=name.strip() or Path(file.filename).stem,filename=Path(file.filename).name,
+            source_path=str(path.resolve()),source_hash=hashlib.sha256(content).hexdigest(),
+            sender_snapshot={},context_snapshot={'name':'Предложение','summary':offer[:2500],
+                'source_text':offer,'source_hash':hashlib.sha256(offer.encode()).hexdigest(),
+                'source_name':Path(offer_filename).name[:200]},
+            config={'workflow':'offer-coarse-v2','source_filters':source_filters.strip(),
+                    'models':{'synthesis':settings.model_synthesis},'pipeline_version':3},budget=0)
+        try:
+            db.add(run);db.flush();import_rows(db,run)
+            log(db,rid,'IMPORTED','База и предложение сохранены',metrics={'rows':run.row_count,'companies':run.company_count})
+            db.commit()
+        except ValueError as exc:
+            db.rollback();shutil.rmtree(folder,ignore_errors=True);raise HTTPException(422,str(exc))
+        return run_view(run)
+
 @app.get('/api/runs/{rid}')
 def run_detail(rid:str):
     with Session() as db:
@@ -201,7 +239,7 @@ def start(rid:str):
         r=get(db,Run,rid)
         if r.reports.get('pilot',{}).get('kind')=='base_only':
             raise HTTPException(409,'Это пилот только базового сбора; обычный запуск сегментации отключён')
-        if r.config.get('workflow')!='coarse-v1' and not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
+        if r.config.get('workflow') not in ('coarse-v1',) and not credentials.for_run(r):raise HTTPException(409,'Добавьте API-ключ в настройках')
         if r.config.get('pipeline_version',1)<3 and db.query(ModelCall).filter_by(run_id=rid).count():raise HTTPException(409,'Это исследование создано старой версией конвейера. Для продолжения требуется перенос сохранённых результатов; автоматический повтор отключён.')
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Запуск уже выполняется')
         if r.status in ('COMPLETED','COMPLETED_WITH_ISSUES'):raise HTTPException(409,'Используйте повторную обработку статусов')
@@ -309,7 +347,7 @@ def restore_company(cid:str):
 def coarse_companies(rid:str,group:str='',q:str='',offset:int=Query(0,ge=0),limit:int=Query(40,ge=1,le=100)):
     with Session() as db:
         run=get(db,Run,rid)
-        if run.config.get('workflow')!='coarse-v1':raise HTTPException(404,'Быстрая база не найдена')
+        if run.config.get('workflow') not in ('coarse-v1','offer-coarse-v2'):raise HTTPException(404,'База не найдена')
         query=db.query(Company).filter_by(run_id=rid)
         if group:query=query.filter(Company.group==group)
         if q:query=query.filter(Company.name.ilike('%'+q+'%'))
@@ -317,7 +355,8 @@ def coarse_companies(rid:str,group:str='',q:str='',offset:int=Query(0,ge=0),limi
         items=query.order_by(Company.name,Company.id).offset(offset).limit(limit).all()
         return {'total':total,'items':[{'id':c.id,'name':c.name,'resource':c.resource,'audience_id':c.group,
             'reason':c.reason,'confidence':(c.profile or {}).get('coarse',{}).get('confidence',''),
-            'source':(c.profile or {}).get('coarse',{}).get('source','')} for c in items]}
+            'source':(c.profile or {}).get('coarse',{}).get('source',''),
+            'vacancy':(c.profile or {}).get('coarse_vacancy',{'state':'NOT_CONFIRMED'})} for c in items]}
 
 class CoarseReviewInput(BaseModel):
     audience_id:str
@@ -327,7 +366,7 @@ class CoarseReviewInput(BaseModel):
 def review_coarse_company(rid:str,cid:str,payload:CoarseReviewInput):
     with Session() as db:
         run=get(db,Run,rid);company=get(db,Company,cid)
-        if run.config.get('workflow')!='coarse-v1' or company.run_id!=rid:raise HTTPException(404,'Компания не найдена в этой базе')
+        if run.config.get('workflow') not in ('coarse-v1','offer-coarse-v2') or company.run_id!=rid:raise HTTPException(404,'Компания не найдена в этой базе')
         if run.status!='COMPLETED':raise HTTPException(409,'Дождитесь окончания обработки')
         allowed={'GENERAL','DO_NOT_SEND'}|{segment['id'] for segment in run.segments}
         if payload.audience_id not in allowed:raise HTTPException(422,'Неизвестная аудитория')
@@ -357,7 +396,7 @@ def make_export(rid:str):
         r=get(db,Run,rid)
         if r.status in ('RUNNING','QUEUED','PAUSING'):raise HTTPException(409,'Для согласованного экспорта дождитесь остановки')
         try:
-            if r.config.get('workflow')=='coarse-v1':
+            if r.config.get('workflow') in ('coarse-v1','offer-coarse-v2'):
                 from .coarse import export as export_coarse
                 e=export_coarse(db,r,settings.data_dir/'exports')
             else:e=export_run(db,r,settings.data_dir/'exports')
