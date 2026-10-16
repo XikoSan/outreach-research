@@ -44,7 +44,48 @@ def test_cross_batch_members_reuse_same_proposal():
             if self.calls==2:assert payload['existing_groups'][0]['id']=='shared'
             p=payload['profiles'][0]
             member=dict(company_id=p['company_id'],context_signal=p['signals'][1]['name'],product_signal=p['signals'][0]['name'])
-            return schema.model_validate({'segments':[proposal('shared',[member])],'unassigned':[]})
+            item=proposal('shared',[member])
+            if self.calls==2:item['cooperation_proposal']='Краткая формулировка'
+            return schema.model_validate({'segments':[item],'unassigned':[]})
     fake=Fake();candidates,audit=discover(fake,profiles,[{'id':'service'}])
     assert fake.calls==2 and len(candidates)==1
     assert set(candidates[0]['member_bindings'])=={'0','1'}
+    assert candidates[0]['cooperation_proposal']=='Исследовать критерии выбора'
+
+
+def test_checkpoint_resumes_without_repeating_model_calls(monkeypatch):
+    from types import SimpleNamespace
+    import app.semantic_segmentation as semantic
+    profiles=[]
+    for i in range(7):
+        profiles.append(profile(str(i),[fact('products','Товар','p'),fact('buyer_types','Монтажники','b')],
+                                [evidence('p',quote='Продукт'),evidence('b',quote='Покупатель')]))
+    run=SimpleNamespace(reports={})
+    class Db:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def get(self,model,id):return run
+        def commit(self):pass
+    monkeypatch.setattr(semantic,'Session',Db)
+    class Fake:
+        id='pilot'
+        calls=0
+        def ask(self,role,instructions,payload,schema,**kwargs):
+            self.calls+=1
+            if self.calls==2:raise RuntimeError('interrupted')
+            members=[{'company_id':p['company_id'],
+                      'context_signal':p['signals'][1]['name'],
+                      'product_signal':p['signals'][0]['name']}
+                     for p in payload['profiles']]
+            return schema.model_validate({'segments':[proposal('shared',members)],'unassigned':[]})
+    first=Fake()
+    import pytest
+    with pytest.raises(RuntimeError,match='interrupted'):
+        discover(first,profiles,[{'id':'service'}])
+    assert run.reports['semantic_checkpoint']['next_batch']==1
+    second=Fake()
+    groups,audit=discover(second,profiles,[{'id':'service'}])
+    assert second.calls==1
+    assert run.reports['semantic_checkpoint']['next_batch']==2
+    assert audit['reviewed_companies']==7
+    assert len(groups)==1 and len(groups[0]['member_bindings'])==7

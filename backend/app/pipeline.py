@@ -384,11 +384,21 @@ class Pipeline:
                 examples=positive[:3]+negative[:2]
             review_examples=[compact_segment_review_profile(profile,seg) for profile in examples]
             review_segment=compact_segment_review_bindings(seg,review_examples)
+            if semantic_mode:
+                other_segments=[{'id':x['id'],
+                                 'name':x['name'].encode()[:180].decode(errors='ignore'),
+                                 'offer_id':x['offer_id'],
+                                 'proposal_hint':x['cooperation_proposal'].encode()[:240].decode(errors='ignore')}
+                                for x in merged if x is not seg]
+            else:
+                other_segments=[{'name':x['name'],'hypothesis':x['hypothesis'],
+                                 'outreach_angle':x['outreach_angle']}
+                                for x in merged if x is not seg]
             review=self.ask('segmentation',review_prompt,{'review_kind':'segment','segment':review_segment,'profiles':review_examples,
                 'review_coverage':{'total_verified_members':len(positive) if v3 else None,
                                   'shown_member_ids':[p['company_id'] for p in examples if p['company_id'] in {x['company_id'] for x in positive}] if v3 else [],
                                   'sampling_note':'Показаны примеры участников и контрольные неучастники. Общее число участников проверено классификатором по полным сохранённым доказательствам; не требуй присутствия всей группы в примерах.'},
-                'offers':sender['offers'],'source_filters':source_filters,'other_segments':[{'name':x['name'],'hypothesis':x['hypothesis'],'outreach_angle':x['outreach_angle']} for x in merged if x is not seg]},Review,max_output=3000)
+                'offers':sender['offers'],'source_filters':source_filters,'other_segments':other_segments},Review,max_output=3000)
             reviews.append({'segment':seg,'review':review.model_dump(),'evaluations':evaluations})
             if review.passed:
                 relevant=set(seg['required_signals']+seg['supporting_signals']+
