@@ -13,7 +13,7 @@ def counts(db,rid):
     for group,stage,identity,n in rows:
         groups[group]+=n
         if stage=='PROFILE_READY' and identity=='CONFIRMED':researched+=n
-        if stage=='PROFILE_READY' or group in ATTENTION or group=='EXCLUDED':finished+=n
+        if stage in ('PROFILE_READY','COARSE_READY') or group in ATTENTION or group=='EXCLUDED':finished+=n
     return {'groups':dict(groups),'researched':researched,'finished':finished,'assigned':sum(n for g,n in groups.items() if g.startswith('segment_')),'attention':sum(groups[g] for g in ATTENTION),'excluded':groups['EXCLUDED'],'general':sum(n for g,n in groups.items() if not g.startswith('segment_'))}
 
 def visible_reports(company,run):
@@ -54,7 +54,9 @@ def company_view(company,run,detail=False):
     for facet in ('channel','product'):
         names.update(mapped.get(facet,{}).get('raw_signal_names',[])[:1])
     important=[s for s in signals if s.get('state')=='confirmed' and s.get('confidence') in ('HIGH','MEDIUM') and (not segment or s['name'] in names)]
-    if company.stage=='PROFILE_READY' and company.identity=='CONFIRMED':
+    if run.config.get('workflow')=='coarse-v1':
+        group,reason=company.group,company.reason
+    elif company.stage=='PROFILE_READY' and company.identity=='CONFIRMED':
         if run.config.get('methodology_version')=='campaign-v1':
             from .campaigns import classify_campaign
             group,reason,_=classify_campaign({**company.profile,'company_id':company.id},ev,run.segments)

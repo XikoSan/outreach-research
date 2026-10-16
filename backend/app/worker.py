@@ -36,6 +36,9 @@ def main():
         if not run_id and not package_id:time.sleep(1);continue
         try:
             if package_id:generate_package(package_id)
+            elif run and run.config.get('workflow')=='coarse-v1':
+                from .coarse import execute as execute_coarse
+                execute_coarse(run_id)
             else:Pipeline(run_id).execute()
         except (BudgetPause,RunPaused,UncertainCall) as e:
             with Session() as db:
