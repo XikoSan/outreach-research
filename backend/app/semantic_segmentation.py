@@ -53,7 +53,7 @@ def discover(pipeline, profiles, offers):
     for p in prepared:
         length=len(json.dumps(p,ensure_ascii=False).encode())
         if length>65000:raise ValueError('Профиль слишком велик для полной смысловой проверки; требуется разбиение без потери фактов')
-        if batch and size+length>65000:batches.append(batch);batch=[];size=0
+        if batch and (size+length>24000 or len(batch)>=8):batches.append(batch);batch=[];size=0
         batch.append(p);size+=length
     if batch:batches.append(batch)
     for batch in batches:

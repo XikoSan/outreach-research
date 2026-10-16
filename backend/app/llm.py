@@ -139,7 +139,7 @@ class Gateway:
         api_started=time.monotonic()
         try:
             # Parse manually after recording usage, so invalid JSON does not hide billing.
-            response = OpenAIAdapter().generate(self.client,dict(model=model,instructions=instructions,input=[{'role':'user','content':text}],text={'format':{'type':'json_schema','name':schema.__name__,'strict':True,'schema':strict_schema(schema.model_json_schema())}},max_output_tokens=max_output,reasoning={'effort':'low' if role in ('discovery','extraction') else 'medium'},store=False,**kwargs),stream=credentials.uses_chatgpt(run))
+            response = OpenAIAdapter().generate(self.client,dict(model=model,instructions=instructions,input=[{'role':'user','content':text}],text={'format':{'type':'json_schema','name':schema.__name__,'strict':True,'schema':strict_schema(schema.model_json_schema())}},max_output_tokens=max_output,reasoning={'effort':'low' if role in ('discovery','extraction') else 'medium'},store=False,timeout=300 if role=='segmentation' else 90,**kwargs),stream=credentials.uses_chatgpt(run))
         except Exception as error:
             api_seconds=round(time.monotonic()-api_started,3)
             if isinstance(error,APIStatusError) and error.status_code==429:

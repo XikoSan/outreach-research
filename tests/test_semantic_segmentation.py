@@ -13,17 +13,19 @@ def test_all_profiles_considered_more_than_three_groups_and_fabrications_rejecte
         profiles.append(profile(cid,[fact('products','Товар '+cid,'p'),fact('buyer_types','Монтажники '+cid,'b')],[evidence('p',quote='Продукт'),evidence('b',quote='Покупатели')]))
     class Fake:
         def ask(self,role,instructions,payload,schema,**kwargs):
-            assert {p['company_id'] for p in payload['profiles']}=={str(i) for i in range(10)}
+            ids={p['company_id'] for p in payload['profiles']}
+            assert len(ids)<=8
             groups=[]
             for i in range(4):
+                if str(i*2) not in ids:continue
                 members=[dict(company_id=str(j),context_signal=profiles[j]['signals'][1]['name'],product_signal=profiles[j]['signals'][0]['name']) for j in (i*2,i*2+1)]
                 groups.append(proposal(str(i),members))
-            groups.append(proposal('invalid',[dict(company_id='8',context_signal='invented',product_signal='invented2')]))
+            if '8' in ids:groups.append(proposal('invalid',[dict(company_id='8',context_signal='invented',product_signal='invented2')]))
             return schema.model_validate({'segments':groups,'unassigned':[{'company_id':'9','reason':'Нет общей ситуации'}]})
     candidates,audit=discover(Fake(),profiles,[{'id':'service'}])
     assert len(candidates)==4
     assert audit['reviewed_companies']==10
-    assert {x['company_id'] for x in audit['batches'][0]['unassigned']}=={'8','9'}
+    assert {x['company_id'] for x in [item for batch in audit['batches'] for item in batch['unassigned']]}=={'8','9'}
     assert sum(len(g['member_bindings']) for g in candidates)==8
 
 
