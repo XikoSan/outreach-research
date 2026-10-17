@@ -52,6 +52,15 @@ class Company(Base):
     research: Mapped[dict] = mapped_column(JSON, default=dict)
     profile: Mapped[dict] = mapped_column(JSON, default=dict)
     reason: Mapped[str] = mapped_column(Text, default='')
+class BaseCompanyName(Base):
+    """Compact per-base company list used only for the workspace overview."""
+    __tablename__ = 'base_company_names'
+    company_id: Mapped[str] = mapped_column(ForeignKey('companies.id'), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'), index=True)
+    name: Mapped[str] = mapped_column(String)
+    name_key: Mapped[str] = mapped_column(String, index=True)
+    inn: Mapped[str] = mapped_column(String, default='', index=True)
+    website: Mapped[str] = mapped_column(String, default='')
 class SourceRow(Base):
     display_fields: Mapped[list] = mapped_column(JSON,default=list)
     __tablename__ = 'source_rows'

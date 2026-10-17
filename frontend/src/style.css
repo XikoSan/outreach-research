@@ -24,3 +24,12 @@
 
 /* First-pass form stays compact on wide screens. */
 .new-research-block{max-width:960px}.new-research-block label{max-width:900px}
+
+/* All-time workspace totals, computed from compact per-base company indexes. */
+.base-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 22px}
+.base-stat{min-height:112px;padding:20px 22px;border:1px solid var(--line);border-radius:11px;background:#fff;display:flex;flex-direction:column;justify-content:center;gap:10px}
+.base-stat span{font-size:12px;font-weight:700;color:var(--muted)}
+.base-stat strong{font-size:25px;line-height:1.1;letter-spacing:-.7px}
+.base-stat a{font-size:13px;font-weight:700;align-self:flex-start}
+@media(max-width:920px){.base-overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:500px){.base-overview{grid-template-columns:1fr}.base-stat{min-height:86px}}

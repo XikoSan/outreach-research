@@ -22,6 +22,8 @@ from . import oauth
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine)
+    from .base_stats import backfill_indexes
+    with Session() as db:backfill_indexes(db)
     credentials.migrate_global()
     with Session() as db:seed(db)
     yield
@@ -138,6 +140,11 @@ def offer_runs(offset:int=Query(0,ge=0),limit:int=Query(20,ge=1,le=50)):
         for r in query.order_by(Run.created_at.desc(),Run.id).offset(offset).limit(limit):
             items.append({k:getattr(r,k) for k in ('id','name','company_count','row_count','status','stage','created_at','spent')}|counts(db,r.id))
         return {'items':items,'total':total}
+
+@app.get('/api/offer-runs/overview')
+def offer_runs_overview():
+    from .base_stats import workspace_overview
+    with Session() as db:return workspace_overview(db)
 
 @app.post('/api/runs')
 def create_run(file:UploadFile=File(...),sender_id:str=Form(''),budget:float=Form(0),config_json:str=Form('{}'),name:str=Form(''),context_id:str=Form(''),source_filters:str=Form('')):

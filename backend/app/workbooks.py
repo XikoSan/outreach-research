@@ -219,6 +219,8 @@ def import_rows(db,run):
                     'name':str(headers[cell.column-1] or f'Колонка {cell.column}'),
                     'value':str(cell.value) if cell.value is not None else ''} for cell in cells]))
     db.add_all(companies);db.flush();db.add_all(rows_out)
+    from .base_stats import index_companies
+    index_companies(db,run,companies)
     run.row_count=len(rows_out);run.company_count=len(companies)
     run.config={**run.config,'sheets':[{'name':w.title,'headers':h,'rows':len(rs)} for w,h,_,_,rs in sheets]}
     wb.close()
