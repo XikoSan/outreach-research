@@ -19,6 +19,6 @@ function Bases({open}:any){
 function App(){
  const [page,setPage]=useState<'bases'|'settings'>('bases'),[rid,setRid]=useState<string|null>(null);
  const back=()=>{setRid(null);setPage('bases')};
- return <div className="workspace"><main><div className="content"><div className="workspace-tools"><a className="workspace-logo" href="#" aria-label="XTECH — базы" onClick={e=>{e.preventDefault();back();}}><img src="/xtech-logo.png" alt="XTECH"/></a><button onClick={()=>{setRid(null);setPage(page==='settings'?'bases':'settings')}}><Settings size={16}/>{page==='settings'?'К базам':'API'}</button></div>{page==='settings'?<Connection back={back}/>:rid?<CoarseDetail key={rid} id={rid} back={back}/>:<Bases open={setRid}/>}</div></main></div>;
+ return <div className="workspace"><main><div className="content"><div className="workspace-tools"><a className="workspace-logo" href="#" aria-label="ReachLab — базы" onClick={e=>{e.preventDefault();back();}}><img src="/reachlab-logo.png" alt="ReachLab"/></a><button onClick={()=>{setRid(null);setPage(page==='settings'?'bases':'settings')}}><Settings size={16}/>{page==='settings'?'К базам':'API'}</button></div>{page==='settings'?<Connection back={back}/>:rid?<CoarseDetail key={rid} id={rid} back={back}/>:<Bases open={setRid}/>}</div></main></div>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
