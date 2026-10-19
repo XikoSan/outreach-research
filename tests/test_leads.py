@@ -58,14 +58,17 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
                                             observation='Производит офисную мебель', relevance='Канал продаж')])
         if role == 'segmentation':
             assert 'profile' not in payload and 'group' not in payload
-            return lead_research.LeadReport(
+            return lead_research.CompanyDossier(
                 company_summary='Производитель офисной мебели',
                 expressed_interest='Ответивший интересуется региональными продажами',
                 findings='У компании есть офисная мебель.',
-                recommendations=[lead_research.Recommendation(
-                    title='Обсудить региональный канал', rationale='Ответивший указал интерес',
-                    proposed_action='Уточнить приоритетные регионы',
-                    evidence_ids=['f1'], reply_quote='Интересно расширить продажи в регионах.')])
+                sections=[lead_research.DossierSection(topic='Деятельность', text='Производит офисную мебель.', evidence_ids=['f1'])],
+                question_map=[lead_research.QuestionAssessment(id='activity', status='partial', answer='Мебель', evidence_ids=['f1'])])
+        if role == 'prompt' and schema is lead_research.RecommendationSet:
+            return lead_research.RecommendationSet(recommendations=[lead_research.Recommendation(
+                title='Обсудить региональный канал', rationale='Ответивший указал интерес',
+                proposed_action='Уточнить приоритетные регионы',
+                evidence_ids=['f1'], reply_quote='Интересно расширить продажи в регионах.')])
         if role == 'prompt':
             return lead_research.LetterDraft(subject='О региональных продажах',
                                              body='Анна, спасибо за ответ. Какие регионы сейчас приоритетны?')
@@ -82,6 +85,9 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
     detail = client.get('/api/leads/' + lead_id).json()
     assert detail['status'] == 'COMPLETED'
     assert detail['report']['facts'][0]['url'] == 'https://a.example'
+    assert detail['report']['sections'][0]['topic'] == 'Деятельность'
+    assert detail['report']['question_map'][0]['status'] == 'partial'
+    assert detail['report']['coverage'] == 'INCOMPLETE'
     assert detail['report']['recommendations'][0]['evidence_ids'] == ['f1']
     assert not detail['letter']
     assert client.get('/api/offer-runs/overview').json()['researched'] == 1
@@ -102,7 +108,19 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
     assert 'Какие регионы' in detail['letter']
     assert 'Тема: О региональных продажах' in client.get('/api/leads/' + lead_id + '/letter.txt').text
     assert client.get('/api/offer-runs/overview').json()['researched'] == 1
-    assert [role for role, _ in calls] == ['extraction', 'segmentation', 'prompt']
+    assert [role for role, _ in calls] == ['extraction', 'segmentation', 'prompt', 'prompt']
+    rerun = client.post('/api/leads/' + lead_id + '/rerun')
+    assert rerun.status_code == 200, rerun.text
+    assert rerun.json()['status'] == 'QUEUED'
+    assert rerun.json()['report_versions'][0]['version'] == 1
+    assert rerun.json()['report']['company_summary']
+    archived = client.get('/api/leads/' + lead_id + '/versions/1/report.md')
+    assert archived.status_code == 200
+    assert 'Производит офисную мебель' in archived.text
+    with Session() as db:
+        run = db.get(Run, db.get(Lead, lead_id).research_run_id)
+        assert run.context_snapshot['research_revision'] == 2
+        assert run.config['max_search_queries'] == 2
 
 
 def test_invalid_source_quote_is_not_reported():
@@ -141,26 +159,32 @@ def test_standard_depth_stops_before_paid_search_when_sources_are_sufficient(cli
         'depth': 'standard'}).json()['id']
     monkeypatch.setattr(lead_research, 'fetch', lambda url: {
         'url': url, 'title': 'О компании',
-        'text': 'Компания Мебель А производит офисную мебель для региональных дилеров.',
+        'text': 'Компания Мебель А производит офисную мебель. Работает с региональными дилерами. Заказы принимаются через сайт.',
         'links': [], 'retrieved_at': '2026-10-19', 'date_metadata': []})
     roles = []
     def fake_ask(self, role, instructions, payload, schema, **kwargs):
         roles.append(role)
         if role == 'extraction':
             return lead_research.ExtractedFacts(
-                facts=[lead_research.ExtractedFact(
-                    source_index=0, quote='Компания Мебель А производит офисную мебель для региональных дилеров.',
-                    observation='Работает с региональными дилерами', relevance='Региональные продажи')],
+                facts=[
+                    lead_research.ExtractedFact(source_index=0, quote='Компания Мебель А производит офисную мебель.',
+                        observation='Производит офисную мебель', relevance='Деятельность', question_ids=['activity', 'products']),
+                    lead_research.ExtractedFact(source_index=0, quote='Работает с региональными дилерами.',
+                        observation='Покупатели — региональные дилеры', relevance='Покупатели', question_ids=['buyers']),
+                    lead_research.ExtractedFact(source_index=0, quote='Заказы принимаются через сайт.',
+                        observation='Принимает заказы через сайт', relevance='Путь обращения', question_ids=['ordering'])],
                 needs_more_sources=False)
         if role == 'segmentation':
-            return lead_research.LeadReport(
+            return lead_research.CompanyDossier(
                 company_summary='Производитель мебели',
                 expressed_interest='Интерес к региональным продажам',
                 findings='Компания работает с дилерами.',
-                recommendations=[lead_research.Recommendation(
-                    title='Уточнить регионы', rationale='Ответ и факт',
-                    proposed_action='Обсудить регионы', evidence_ids=['f1'],
-                    reply_quote='Нужно расширить продажи в регионах.')])
+                sections=[lead_research.DossierSection(topic='Покупатели', text='Работает с дилерами.', evidence_ids=['f1'])])
+        if role == 'prompt' and schema is lead_research.RecommendationSet:
+            return lead_research.RecommendationSet(recommendations=[lead_research.Recommendation(
+                title='Уточнить регионы', rationale='Ответ и факт',
+                proposed_action='Обсудить регионы', evidence_ids=['f1'],
+                reply_quote='Нужно расширить продажи в регионах.')])
         raise AssertionError('Unnecessary model call: ' + role)
     monkeypatch.setattr(lead_research.Gateway, 'ask', fake_ask)
     with Session() as db:
@@ -168,4 +192,131 @@ def test_standard_depth_stops_before_paid_search_when_sources_are_sufficient(cli
         db.get(Run, lead.research_run_id).status = 'RUNNING'
         db.commit()
     lead_research.execute(lead_id)
-    assert roles == ['extraction', 'segmentation']
+    assert roles == ['extraction', 'segmentation', 'prompt']
+
+
+def test_company_page_selection_keeps_product_and_portfolio():
+    page = {'links': [
+        {'label': 'Политика конфиденциальности', 'url': 'https://factory.example/privacy'},
+        {'label': 'Услуги', 'url': 'https://factory.example/services'},
+        {'label': 'Прицепы и полуприцепы', 'url': 'https://factory.example/izgotovlenie-kuzovov'},
+        {'label': 'Выполненные работы', 'url': 'https://factory.example/portfolio'},
+    ]}
+    selected = lead_research._relevant_links(page, 'https://factory.example/', {'интересно'}, 3)
+    assert len(selected) == 3
+    assert 'https://factory.example/izgotovlenie-kuzovov' in selected
+    assert not any('privacy' in url for url in selected)
+
+
+def test_no_verified_sources_produces_incomplete_dossier_without_synthesis(client, monkeypatch):
+    from app.crawler import SourceUnavailable
+    created = client.post('/api/offer-runs',
+        files={'file': ('base.xlsx', workbook(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+        data={'name': 'База', 'offer_text': 'Развитие продаж и продуктовых направлений.'})
+    rid = created.json()['id']
+    row = client.get('/api/lead-candidates', params={'run_id': rid, 'q': 'first@example.test'}).json()[0]
+    response = client.post('/api/leads', json={
+        'source_row_id': row['source_row_id'], 'reply': 'Тема интересна. Какие предложения?',
+        'offer': 'Развитие продаж и продуктовых направлений.', 'depth': 'brief',
+        'original_message': 'Предлагаем обсудить развитие продукции.',
+        'additional_sites': ['https://other.example/company'],
+    })
+    assert response.status_code == 200, response.text
+    lid = response.json()['id']
+    assert response.json()['original_message'] == 'Предлагаем обсудить развитие продукции.'
+    assert response.json()['additional_sites'] == ['https://other.example/company']
+    monkeypatch.setattr(lead_research, 'fetch', lambda url: (_ for _ in ()).throw(SourceUnavailable('Недоступно')))
+    monkeypatch.setattr(lead_research.Gateway, 'ask', lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError('No model call needed')))
+    with Session() as db:
+        lead = db.get(Lead, lid)
+        db.get(Run, lead.research_run_id).status = 'RUNNING'
+        db.commit()
+    lead_research.execute(lid)
+    detail = client.get('/api/leads/' + lid).json()
+    assert detail['report']['coverage'] == 'INCOMPLETE'
+    assert detail['report']['recommendations'] == []
+    assert detail['report']['question_map'][0]['status'] == 'unavailable'
+    assert 'Не удалось использовать' in client.get('/api/leads/' + lid + '/report.md').text
+
+
+def test_secondary_site_is_explored_when_main_site_unavailable(monkeypatch):
+    from types import SimpleNamespace
+    from app.crawler import SourceUnavailable
+    def fake_fetch(url):
+        if url == 'https://missing.example/':
+            raise SourceUnavailable('HTTP 404')
+        if url == 'https://backup.example/':
+            return {'url': url, 'title': 'Компания', 'text': 'Компания выпускает изделия для заказчиков.',
+                    'links': [{'label': 'Услуги', 'url': 'https://backup.example/services'}],
+                    'retrieved_at': '2026-10-19', 'date_metadata': []}
+        return {'url': url, 'title': 'Услуги', 'text': 'Компания оказывает услуги по изготовлению деталей.',
+                'links': [], 'retrieved_at': '2026-10-19', 'date_metadata': []}
+    monkeypatch.setattr(lead_research, 'fetch', fake_fetch)
+    lead = SimpleNamespace(depth='brief', reply='Тема интересна. Какие предложения?', offer='Услуги.')
+    company = SimpleNamespace(resource='https://missing.example/', name='Компания', context={'socials': []})
+    pages, failures = lead_research.collect(lead, company, None, additional_sites=['https://backup.example/'])
+    assert [page['url'] for page in pages] == ['https://backup.example/', 'https://backup.example/services']
+    assert all(page['origin'] == 'provided' for page in pages)
+    assert failures[0]['url'] == 'https://missing.example/'
+
+
+def test_gap_search_extracts_only_new_page(client, monkeypatch):
+    created = client.post('/api/offer-runs',
+        files={'file': ('base.xlsx', workbook(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+        data={'name': 'База', 'offer_text': 'Развитие продуктов и продаж.'})
+    rid = created.json()['id']
+    row = client.get('/api/lead-candidates', params={'run_id': rid, 'q': 'first@example.test'}).json()[0]
+    lid = client.post('/api/leads', json={
+        'source_row_id': row['source_row_id'], 'reply': 'Интересно обсудить продажи.',
+        'offer': 'Развитие продуктов и продаж.', 'depth': 'standard',
+    }).json()['id']
+    def fake_fetch(url):
+        if url == 'https://a.example':
+            return {'url': url, 'title': 'Сайт', 'text': 'Мебель А производит офисную мебель.',
+                    'links': [], 'retrieved_at': '2026-10-19', 'date_metadata': []}
+        return {'url': url, 'title': 'Профиль',
+                'text': 'Мебель А работает с региональными дилерами. Заказы принимаются через сайт.',
+                'links': [], 'retrieved_at': '2026-10-19', 'date_metadata': []}
+    monkeypatch.setattr(lead_research, 'fetch', fake_fetch)
+    extraction_payloads = []
+    def fake_ask(self, role, instructions, payload, schema, **kwargs):
+        if role == 'extraction':
+            extraction_payloads.append(payload)
+            if len(extraction_payloads) == 1:
+                return lead_research.ExtractedFacts(facts=[lead_research.ExtractedFact(
+                    source_index=0, quote='Мебель А производит офисную мебель.',
+                    observation='Производит мебель', relevance='Деятельность',
+                    question_ids=['activity', 'products'])], needs_more_sources=True)
+            return lead_research.ExtractedFacts(facts=[lead_research.ExtractedFact(
+                source_index=0, quote='Мебель А работает с региональными дилерами.',
+                observation='Работает с дилерами', relevance='Покупатели', question_ids=['buyers'])],
+                needs_more_sources=False)
+        if role == 'discovery':
+            assert any('заказ' in q.lower() or 'обращ' in q.lower() for q in payload['unanswered_questions'])
+            return lead_research.DiscoveredSources(sources=[lead_research.DiscoveredSource(
+                url='https://catalog.example/m', category='directory', reason='Профиль компании')])
+        if role == 'segmentation':
+            assert {f['id'] for f in payload['facts']} == {'f1', 'f2'}
+            return lead_research.CompanyDossier(
+                company_summary='Производит мебель для дилеров.',
+                expressed_interest='Интерес к продажам', findings='Два проверенных источника.',
+                summary_evidence_ids=['f1', 'f2'],
+                sections=[lead_research.DossierSection(
+                    topic='Деятельность', text='Производит мебель.', evidence_ids=['f1'])])
+        if role == 'prompt':
+            return lead_research.RecommendationSet(recommendations=[lead_research.Recommendation(
+                title='Общее предложение', rationale='Ответил на письмо', proposed_action='Обсудить сотрудничество',
+                reply_quote='Интересно обсудить продажи.')])
+        raise AssertionError(role)
+    monkeypatch.setattr(lead_research.Gateway, 'ask', fake_ask)
+    with Session() as db:
+        lead = db.get(Lead, lid)
+        db.get(Run, lead.research_run_id).status = 'RUNNING'
+        db.commit()
+    lead_research.execute(lid)
+    assert [len(p['pages']) for p in extraction_payloads] == [1, 1]
+    assert [p['pages'][0]['index'] for p in extraction_payloads] == [0, 0]
+    result = client.get('/api/leads/' + lid).json()['report']
+    assert [fact['id'] for fact in result['facts']] == ['f1', 'f2']
+    assert result['coverage'] == 'INCOMPLETE'
+    assert result['recommendations'] == []

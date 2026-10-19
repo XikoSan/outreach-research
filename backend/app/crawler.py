@@ -83,6 +83,7 @@ def robots_allowed(url):
 def parse_page(final,html):
     soup=BeautifulSoup(html,'html.parser')
     title=soup.title.get_text(' ',strip=True) if soup.title else ''
+    images=[{'alt': tag.get('alt','')[:160], 'src': urljoin(final,tag.get('src',''))} for tag in soup.find_all('img',src=True)][:30]
     links=[]
     for a in soup.find_all('a',href=True):
         target=urljoin(final,a['href']).split('#')[0]
@@ -93,7 +94,7 @@ def parse_page(final,html):
     text=' '.join(soup.get_text(' ',strip=True).split())
     if len(text)<80:raise SourceUnavailable('Недостаточно доступного текста; возможно нужна JS-загрузка')
     return {'url':final,'title':title,'text':text[:24000],'truncated':len(text)>24000,
-            'links':list({x['url']:x for x in links}.values())[:200],'date_metadata':dates,
+            'links':list({x['url']:x for x in links}.values())[:200],'image_count':len(images),'date_metadata':dates,
             'retrieved_at':datetime.now(timezone.utc).isoformat(),'content_hash':hashlib.sha256(text.encode()).hexdigest()}
 
 def fetch(url):
