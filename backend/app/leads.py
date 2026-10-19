@@ -192,8 +192,25 @@ def start_lead(lead_id: str):
         return _view(db, lead, True)
 
 
+class LeadRerun(BaseModel):
+    offer: str | None = Field(default=None, min_length=10, max_length=100000)
+    original_message: str | None = Field(default=None, max_length=20000)
+    additional_sites: list[str] | None = Field(default=None, max_length=5)
+    depth: str | None = None
+
+
 @router.post('/leads/{lead_id}/rerun')
-def rerun_lead(lead_id: str):
+def rerun_lead(lead_id: str, payload: LeadRerun | None = None):
+    payload = payload or LeadRerun()
+    if payload.depth is not None and payload.depth not in ('brief', 'standard', 'expanded'):
+        raise HTTPException(422, 'Неизвестная глубина исследования')
+    if payload.offer is not None and not payload.offer.strip():
+        raise HTTPException(422, 'Оффер не может быть пустым')
+    try:
+        additional_sites = None if payload.additional_sites is None else list(dict.fromkeys(
+            normalize_url(url.strip()) for url in payload.additional_sites if url.strip()))
+    except SourceUnavailable as exc:
+        raise HTTPException(422, str(exc)) from exc
     with Session() as db:
         lead = _get(db, Lead, lead_id)
         run = _get(db, Run, lead.research_run_id)
@@ -204,12 +221,21 @@ def rerun_lead(lead_id: str):
         history = dict(run.reports or {})
         versions = list(history.get('lead_report_versions', []))
         versions.append({'report': lead.report, 'letter': lead.letter,
+                         'offer': lead.offer, 'depth': lead.depth,
                          'context': run.context_snapshot, 'archived_at': now()})
         history['lead_report_versions'] = versions
         run.reports = history
         context = dict(run.context_snapshot or {})
         context['research_revision'] = int(context.get('research_revision', 1)) + 1
+        if payload.original_message is not None:
+            context['original_message'] = payload.original_message.strip()
+        if additional_sites is not None:
+            context['additional_sites'] = additional_sites
         run.context_snapshot = context
+        if payload.offer is not None:
+            lead.offer = payload.offer.strip()
+        if payload.depth is not None:
+            lead.depth = payload.depth
         config = dict(run.config)
         config['max_search_queries'] = int(config.get('max_search_queries', 1)) + 1
         run.config = config
@@ -283,6 +309,8 @@ def _report_markdown(lead, company, context=None, report=None):
              '', lead.reply, '']
     if context.get('original_message'):
         lines += ['Исходное письмо:', '', context['original_message'], '']
+    if report.get('quality_review'):
+        lines += ['## Замечание проверки', '', report['quality_review'], '']
     lines += ['## Краткая картина компании', '', report.get('company_summary', ''), '']
     if report.get('coverage') == 'INCOMPLETE':
         lines += ['Исследование неполное: публичных сведений недостаточно для полной картины.', '']

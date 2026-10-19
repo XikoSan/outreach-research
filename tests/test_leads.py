@@ -68,7 +68,10 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
             return lead_research.RecommendationSet(recommendations=[lead_research.Recommendation(
                 title='Обсудить региональный канал', rationale='Ответивший указал интерес',
                 proposed_action='Уточнить приоритетные регионы',
-                evidence_ids=['f1'], reply_quote='Интересно расширить продажи в регионах.')])
+                evidence_ids=['f1'], reply_quote='Интересно расширить продажи в регионах.'),
+                lead_research.Recommendation(title='Уточнить запрос', rationale='Интерес пока общий',
+                proposed_action='Спросить о приоритетной задаче', evidence_ids=[],
+                reply_quote='Интересно расширить продажи в регионах.')])
         if role == 'prompt':
             return lead_research.LetterDraft(subject='О региональных продажах',
                                              body='Анна, спасибо за ответ. Какие регионы сейчас приоритетны?')
@@ -89,6 +92,9 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
     assert detail['report']['question_map'][0]['status'] == 'partial'
     assert detail['report']['coverage'] == 'INCOMPLETE'
     assert detail['report']['recommendations'][0]['evidence_ids'] == ['f1']
+    assert len(detail['report']['recommendations']) == 2
+    assert detail['report']['recommendations'][1]['evidence_ids'] == []
+    assert detail['report']['recommendations'][1]['reply_quote'] == 'Интересно расширить продажи в регионах.'
     assert not detail['letter']
     assert client.get('/api/offer-runs/overview').json()['researched'] == 1
     downloaded = client.get('/api/leads/' + lead_id + '/report.md')
@@ -109,17 +115,28 @@ def test_interested_lead_report_and_optional_letter(client, monkeypatch):
     assert 'Тема: О региональных продажах' in client.get('/api/leads/' + lead_id + '/letter.txt').text
     assert client.get('/api/offer-runs/overview').json()['researched'] == 1
     assert [role for role, _ in calls] == ['extraction', 'segmentation', 'prompt', 'prompt']
-    rerun = client.post('/api/leads/' + lead_id + '/rerun')
+    rerun = client.post('/api/leads/' + lead_id + '/rerun', json={
+        'offer': 'Новый оффер для регионального развития продаж мебели.',
+        'original_message': 'Мы писали о продажах в регионах.',
+        'additional_sites': ['https://other.example/company'],
+        'depth': 'expanded',
+    })
     assert rerun.status_code == 200, rerun.text
     assert rerun.json()['status'] == 'QUEUED'
     assert rerun.json()['report_versions'][0]['version'] == 1
     assert rerun.json()['report']['company_summary']
+    assert rerun.json()['offer'] == 'Новый оффер для регионального развития продаж мебели.'
+    assert rerun.json()['original_message'] == 'Мы писали о продажах в регионах.'
+    assert rerun.json()['additional_sites'] == ['https://other.example/company']
+    assert rerun.json()['depth'] == 'expanded'
     archived = client.get('/api/leads/' + lead_id + '/versions/1/report.md')
     assert archived.status_code == 200
     assert 'Производит офисную мебель' in archived.text
     with Session() as db:
         run = db.get(Run, db.get(Lead, lead_id).research_run_id)
         assert run.context_snapshot['research_revision'] == 2
+        assert run.reports['lead_report_versions'][0]['offer'] == 'Помогаем мебельным компаниям развивать продажи через новый канал.'
+        assert run.reports['lead_report_versions'][0]['depth'] == 'brief'
         assert run.config['max_search_queries'] == 2
 
 
@@ -319,4 +336,6 @@ def test_gap_search_extracts_only_new_page(client, monkeypatch):
     result = client.get('/api/leads/' + lid).json()['report']
     assert [fact['id'] for fact in result['facts']] == ['f1', 'f2']
     assert result['coverage'] == 'INCOMPLETE'
-    assert result['recommendations'] == []
+    assert len(result['recommendations']) == 1
+    assert result['recommendations'][0]['evidence_ids'] == []
+    assert result['recommendations'][0]['reply_quote'] == 'Интересно обсудить продажи.'
