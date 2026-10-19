@@ -71,6 +71,28 @@ class SourceRow(Base):
     sheet: Mapped[str] = mapped_column(String)
     row_index: Mapped[int] = mapped_column(Integer)
     fingerprint: Mapped[str] = mapped_column(String)
+class Lead(Base):
+    """One interested respondent and one independent follow-up research per company."""
+    __tablename__ = 'leads'
+    __table_args__ = (UniqueConstraint('company_id'),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    source_run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey('companies.id'), index=True)
+    source_row_id: Mapped[str] = mapped_column(ForeignKey('source_rows.id'))
+    research_run_id: Mapped[str] = mapped_column(ForeignKey('runs.id'), unique=True)
+    respondent: Mapped[dict] = mapped_column(JSON, default=dict)
+    reply: Mapped[str] = mapped_column(Text)
+    offer: Mapped[str] = mapped_column(Text)
+    depth: Mapped[str] = mapped_column(String)
+    stage: Mapped[str] = mapped_column(String, default='COLLECTING')
+    pages: Mapped[list] = mapped_column(JSON, default=list)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)
+    letter: Mapped[str] = mapped_column(Text, default='')
+    letter_status: Mapped[str] = mapped_column(String, default='NOT_REQUESTED')
+    selected_recommendation: Mapped[str] = mapped_column(String, default='')
+    created_at: Mapped[str] = mapped_column(String, default=now)
+    updated_at: Mapped[str] = mapped_column(String, default=now)
+
 class Event(Base):
     __tablename__ = 'events'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

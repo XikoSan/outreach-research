@@ -1,7 +1,7 @@
 """Compact company indexes per imported base and all-time workspace totals."""
 from collections import defaultdict
 from sqlalchemy import func
-from .db import BaseCompanyName, Company, Run
+from .db import BaseCompanyName, Company, Run, Lead
 
 
 def index_companies(db, run, companies):
@@ -72,8 +72,7 @@ def unique_company_count(rows):
 def workspace_overview(db):
     rows=db.query(BaseCompanyName).all()
     runs=db.query(Run.segments).all()
-    researched=db.query(Company).filter(Company.stage=='PROFILE_READY',
-        Company.identity=='CONFIRMED').count()
+    researched=sum(1 for (report,) in db.query(Lead.report).all() if report and report.get('checked_at'))
     return {'unique_companies':unique_company_count(rows),
             'segments_defined':sum(len(segments or []) for (segments,) in runs),
             'researched':researched}

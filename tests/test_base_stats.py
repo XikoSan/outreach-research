@@ -35,7 +35,7 @@ def test_overview_deduplicates_across_bases_without_merging_conflicting_inns(cli
         db.commit()
     overview=client.get('/api/offer-runs/overview')
     assert overview.status_code==200
-    assert overview.json()=={'unique_companies':4,'segments_defined':2,'researched':1}
+    assert overview.json()=={'unique_companies':4,'segments_defined':2,'researched':0}  # first-pass profile is not a deep lead report
 
 
 def test_old_base_is_indexed_once_during_backfill(client):

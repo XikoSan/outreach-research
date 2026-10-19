@@ -519,5 +519,8 @@ def research_plan(rid:str):
         saved=run.reports.get('campaign_plan')
         return {'status':'prepared' if saved else 'not_prepared','active_methodology':run.config.get('methodology_version','legacy'),'plan':saved,'base_criteria':BASE_CRITERIA,'basis_policies':BASIS_POLICIES}
 
+from .leads import router as leads_router
+app.include_router(leads_router)
+
 frontend=Path(__file__).resolve().parents[2]/'frontend'/'dist'
 if frontend.exists():app.mount('/',StaticFiles(directory=frontend,html=True),name='ui')

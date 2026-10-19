@@ -32,3 +32,19 @@
 .base-stat strong{font-size:25px;line-height:1.1;letter-spacing:-.7px}
 @media(max-width:920px){.base-overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:500px){.base-overview{grid-template-columns:1fr}.base-stat{min-height:86px}}
+/* Interested leads share the same workspace and retain a separate profile. */
+.leads-home{margin-top:38px}.lead-row{grid-template-columns:minmax(180px,1fr) 180px 125px 110px;align-items:center}
+.candidate-list{display:grid;gap:7px;max-height:260px;overflow:auto;margin:14px 0 20px}
+.candidate-list button{display:flex;flex-direction:column;align-items:flex-start;text-align:left}
+.candidate-list button.selected{border-color:var(--accent);background:#e9f6f8}
+.respondent-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0}
+.respondent-fields label{margin:0}
+.depth-options{display:grid;gap:10px}
+.depth-options label{display:flex;flex-direction:row;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--line);border-radius:8px;margin:0}
+.depth-options input{width:auto;margin-top:3px;accent-color:var(--accent)}
+.depth-options small{font-weight:400;margin-top:4px}
+.lead-fact,.lead-recommendation{padding:16px 0;border-top:1px solid var(--line)}
+.lead-fact p,.lead-recommendation h3{margin:0 0 9px}
+.lead-fact blockquote{margin:6px 0 8px;padding-left:12px;border-left:3px solid #9dccd8}
+.letter-draft{background:#f5f8fa;padding:18px;border-radius:8px}
+@media(max-width:760px){.lead-row{grid-template-columns:1fr auto}.respondent-fields{grid-template-columns:1fr}}

@@ -39,6 +39,13 @@ def main():
             elif run and run.config.get('workflow')=='offer-coarse-v2':
                 from .offer_coarse import execute as execute_offer_coarse
                 execute_offer_coarse(run_id)
+            elif run and run.config.get('workflow')=='lead-research-v1':
+                from .lead_research import execute as execute_lead
+                from .db import Lead
+                with Session() as db:
+                    lead=db.query(Lead).filter_by(research_run_id=run_id).one()
+                    lead_id=lead.id
+                execute_lead(lead_id)
             elif run and run.config.get('workflow')=='coarse-v1':
                 from .coarse import execute as execute_coarse
                 execute_coarse(run_id)
