@@ -36,7 +36,8 @@ def request(url,limit=2_000_000):
     for _ in range(4):
         url=normalize_url(url)
         p,ip=public_address(url)
-        conn=http.client.HTTPConnection(p.hostname,p.port or (443 if p.scheme=='https' else 80),timeout=15)
+        connection_type=http.client.HTTPSConnection if p.scheme=='https' else http.client.HTTPConnection
+        conn=connection_type(p.hostname,p.port or (443 if p.scheme=='https' else 80),timeout=15)
         sock=socket.create_connection((ip,conn.port),timeout=15)
         if p.scheme=='https':sock=ssl.create_default_context().wrap_socket(sock,server_hostname=p.hostname)
         conn.sock=sock

@@ -308,7 +308,7 @@ def _report_markdown(lead, company, context=None, report=None):
                                                       lead.respondent.get('email', '')])),
              '', lead.reply, '']
     if context.get('original_message'):
-        lines += ['Исходное письмо:', '', context['original_message'], '']
+        lines += ['История исходящих писем:', '', context['original_message'], '']
     if report.get('quality_review'):
         lines += ['## Замечание проверки', '', report['quality_review'], '']
     lines += ['## Краткая картина компании', '', report.get('company_summary', ''), '']
